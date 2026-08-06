@@ -32,7 +32,7 @@ connection_condition=6、局部切点、重复 clip、内容型 SubPath 或无�
 - `hardlink_remux`：满足条件的内容硬链接，真正需要组合或裁切的内容无损重封装；完整单段在跨文件系统或运行时链接失败时降级为逐字节复制，不做没有必要且兼容性更差的重封装。
 - `copy_remux`：满足条件的内容复制，其余内容无损重封装，是默认值。
 
-硬链接和重封装使用相同的 Emby 媒体命名；区别写入 dry-run、构建结果及 `.bdmv-emby-state.json`。`bdmv-emby status DESTINATION` 会验证所有成品是否存在、用文件身份复核硬链接，并有限重定位人工移动的 copy/remux 成品。
+硬链接和重封装使用相同的 Emby 媒体命名；区别写入 dry-run、构建结果及 `.bdmv-emby-state.json`。`bdmv-emby-builder status DESTINATION` 会验证所有成品是否存在、用文件身份复核硬链接，并有限重定位人工移动的 copy/remux 成品。
 
 ## 2. 为什么一个 playlist 可以引用多个 M2TS
 
@@ -111,7 +111,7 @@ remux_backend = "concat"
 检查环境：
 
 ```bash
-python3 -m bdmv_emby doctor
+bdmv-emby-builder doctor
 ```
 
 成功结果必须表明 FFmpeg 和 FFprobe 都具有该协议：
@@ -280,7 +280,7 @@ disc_type = "movie"
 ```
 
 ```bash
-python3 -m bdmv_emby plan --config task.toml --out plan.json
+bdmv-emby-builder plan --config task.toml --out plan.json
 ```
 
 这里的 `--out plan.json` 是生成审核计划的输出位置，不是额外配置。
@@ -318,21 +318,21 @@ TOML 不接受 playlist ID、`kind`、`folder` 或单个花絮名称。无法可
 
 ```bash
 # 1. 依赖检查
-python3 -m bdmv_emby doctor
+bdmv-emby-builder doctor
 
 # 2. 扫描，只读
-python3 -m bdmv_emby scan SOURCE --out scan.json
+bdmv-emby-builder scan SOURCE --out scan.json
 
 # 3. TOML 已包含 source、destination 和盘类别
-python3 -m bdmv_emby plan --config task.toml --out plan.json
+bdmv-emby-builder plan --config task.toml --out plan.json
 
 # 4. 解析 auto job，确认 copy/remux 和容量，不写影片
-python3 -m bdmv_emby build plan.json --results dry-run-results.json
+bdmv-emby-builder build plan.json --results dry-run-results.json
 
 # 5. 人工检查 plan 和 dry-run
 
 # 6. 先构建一个 job
-python3 -m bdmv_emby build plan.json --execute --only JOB_ID \
+bdmv-emby-builder build plan.json --execute --only JOB_ID \
   --results one-job-results.json
 
 # 7. 播放检查接缝、音轨和字幕后，再决定是否执行其余 job

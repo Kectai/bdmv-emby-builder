@@ -155,7 +155,8 @@ def _write_build_failure(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bdmv-emby", description="Safely copy or remux BDMV playlists for Emby"
+        prog="bdmv-emby-builder",
+        description="Safely copy or remux BDMV playlists for Emby",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

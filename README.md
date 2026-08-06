@@ -48,15 +48,25 @@ BDMV → Emby Builder 只读分析 Blu-ray BDMV，识别电影、剧集和附加
 - FFmpeg 和 FFprobe；
 - 带 libbluray/`bluray` protocol 的 FFmpeg，用于相关标题识别和多段/切点重封装。
 
-项目没有第三方 Python 依赖。可直接在项目目录运行，也可以安装到项目内虚拟环境：
+项目没有第三方 Python 依赖。建议安装到项目内虚拟环境；激活后统一使用 `bdmv-emby-builder` 命令：
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/bdmv-emby --help
+source .venv/bin/activate
+python -m pip install -e .
+bdmv-emby-builder --help
 ```
 
-Windows 对应命令为 `.venv\Scripts\python.exe` 和 `.venv\Scripts\bdmv-emby.exe`。
+Windows PowerShell 对应命令为：
+
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e .
+bdmv-emby-builder --help
+```
+
+下文命令均假设虚拟环境已经激活；不激活时可直接使用 `.venv/bin/bdmv-emby-builder`，Windows 使用 `.venv\Scripts\bdmv-emby-builder.exe`。
 
 macOS Homebrew 可安装：
 
@@ -73,7 +83,7 @@ brew install ffmpeg-full
 Linux 和 Windows 应安装各自平台带 libbluray 的 FFmpeg 构建。安装后检查实际解析到的程序和协议能力：
 
 ```bash
-python3 -m bdmv_emby doctor
+bdmv-emby-builder doctor
 ```
 
 需要重封装时，结果中的 `bluray_protocol` 应为 `true`。
@@ -103,30 +113,30 @@ processing = "copy_remux"
 
 ```bash
 # 1. 环境检查
-python3 -m bdmv_emby doctor --config task.toml
+bdmv-emby-builder doctor --config task.toml
 
 # 2. 生成可审核计划；不写媒体
-python3 -m bdmv_emby plan --config task.toml --out plan.json
+bdmv-emby-builder plan --config task.toml --out plan.json
 
 # 3. dry-run；解析最终 copy / hardlink / remux 动作
-python3 -m bdmv_emby build plan.json --results dry-run-results.json
+bdmv-emby-builder build plan.json --results dry-run-results.json
 
 # 4. 先构建并播放检查一个任务
-python3 -m bdmv_emby build plan.json --execute \
+bdmv-emby-builder build plan.json --execute \
   --only JOB_ID --results one-job-results.json
 
 # 5. 确认后执行完整计划
-python3 -m bdmv_emby build plan.json --execute \
+bdmv-emby-builder build plan.json --execute \
   --results build-results.json
 
 # 6. 核验目标库状态
-python3 -m bdmv_emby status "/absolute/path/to/EmbyLibrary"
+bdmv-emby-builder status "/absolute/path/to/EmbyLibrary"
 ```
 
 `scan` 是可选的更底层只读检查：
 
 ```bash
-python3 -m bdmv_emby scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
+bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 ```
 
 `plan.json` 是程序生成的审核产物，不是第二份人工配置。重新规划后应重新执行 dry-run，不要手工修改旧计划继续构建。
@@ -306,15 +316,18 @@ Beta 阶段已知边界：
 
 ## 项目结构与文档
 
+遵循 Python 打包惯例：仓库名、分发名和命令使用 `bdmv-emby-builder`，代码中的导入包名使用 `bdmv_emby_builder`，源码置于 `src/` 下。
+
 ```text
-bdmv_emby/
-├── cli.py       # CLI、TOML 与命令调度
-├── limits.py    # 配置与序列化计划共享的安全上限
-├── path_safety.py # 跨平台路径身份与写入边界
-├── scanner.py   # BDMV 发现、META 和 MPLS 扫描
-├── mpls.py      # MPLS 二进制解析
-├── planner.py   # 内容识别、边界、命名与计划
-└── builder.py   # copy、hardlink、remux、校验与状态
+src/
+└── bdmv_emby_builder/
+    ├── cli.py         # CLI、TOML 与命令调度
+    ├── limits.py      # 配置与序列化计划共享的安全上限
+    ├── path_safety.py # 跨平台路径身份与写入边界
+    ├── scanner.py     # BDMV 发现、META 和 MPLS 扫描
+    ├── mpls.py        # MPLS 二进制解析
+    ├── planner.py     # 内容识别、边界、命名与计划
+    └── builder.py     # copy、hardlink、remux、校验与状态
 
 config.example.toml                  # 人工配置示例
 docs/                                # 技术设计与隐私安全

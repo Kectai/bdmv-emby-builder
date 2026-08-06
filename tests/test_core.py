@@ -14,7 +14,7 @@ import unicodedata
 from pathlib import Path
 from unittest.mock import patch
 
-from bdmv_emby.builder import (
+from bdmv_emby_builder.builder import (
     _bluray_remux_command,
     _check_batch_free_space,
     _concat_remux_command,
@@ -39,15 +39,15 @@ from bdmv_emby.builder import (
     inspect_build_state,
     validate_plan,
 )
-from bdmv_emby.cli import main as cli_main
-from bdmv_emby.mpls import (
+from bdmv_emby_builder.cli import main as cli_main
+from bdmv_emby_builder.mpls import (
     PlayItem,
     Playlist,
     PlaylistMark,
     is_menu_loop,
     parse_mpls,
 )
-from bdmv_emby.planner import (
+from bdmv_emby_builder.planner import (
     _collection_group_keys,
     _extract_season_marker,
     _separate_episode_playlists,
@@ -58,8 +58,8 @@ from bdmv_emby.planner import (
     load_config,
     make_plan,
 )
-from bdmv_emby.path_safety import _stat_is_reparse_point, first_symlink
-from bdmv_emby.scanner import (
+from bdmv_emby_builder.path_safety import _stat_is_reparse_point, first_symlink
+from bdmv_emby_builder.scanner import (
     Disc,
     _natural_path_key,
     discover_bdmv,
@@ -280,7 +280,7 @@ class CoreTests(unittest.TestCase):
             canonical = path.with_name("00001.mpls")
             canonical.write_bytes(path.read_bytes())
             with (
-                patch("bdmv_emby.mpls.MAX_MPLS_BYTES", 10),
+                patch("bdmv_emby_builder.mpls.MAX_MPLS_BYTES", 10),
                 self.assertRaisesRegex(ValueError, "safety limit"),
             ):
                 parse_mpls(canonical)
@@ -297,7 +297,7 @@ class CoreTests(unittest.TestCase):
                     [
                         sys.executable,
                         "-c",
-                        "from pathlib import Path; from bdmv_emby.mpls import parse_mpls; "
+                        "from pathlib import Path; from bdmv_emby_builder.mpls import parse_mpls; "
                         "parse_mpls(Path(__import__('sys').argv[1]))",
                         str(fifo_mpls),
                     ],
@@ -318,7 +318,7 @@ class CoreTests(unittest.TestCase):
                         sys.executable,
                         "-c",
                         "from pathlib import Path; "
-                        "from bdmv_emby.scanner import read_metadata_titles; "
+                        "from bdmv_emby_builder.scanner import read_metadata_titles; "
                         "assert read_metadata_titles(Path(__import__('sys').argv[1])) == {}",
                         str(bdmv),
                     ],
@@ -406,7 +406,7 @@ class CoreTests(unittest.TestCase):
             )
             disc = Disc("Disc", root / "BDMV", [playlist], [])
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(2.0, 62.0),
             ):
                 parts = _split_extra_playitems(disc, playlist, "ffprobe", {}, 0.1)
@@ -421,7 +421,7 @@ class CoreTests(unittest.TestCase):
 
             playlist.subpath_types = (4,)
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(2.0, 62.0),
             ):
                 self.assertEqual(
@@ -479,7 +479,7 @@ class CoreTests(unittest.TestCase):
             )
             disc = Disc("Bonus", root / "BDMV", [play_all, standalone], [])
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(2.0, 62.0),
             ):
                 plan = make_plan(
@@ -513,7 +513,7 @@ class CoreTests(unittest.TestCase):
             playlist = Playlist("00001", root / "BDMV/PLAYLIST/00001.mpls", items, [], 0)
             disc = Disc("Disc", root / "BDMV", [playlist], [])
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(2.0, 62.0),
             ):
                 parts = _split_extra_playitems(disc, playlist, "ffprobe", {}, 0.1)
@@ -541,7 +541,7 @@ class CoreTests(unittest.TestCase):
             )
             disc = Disc("Disc", root / "BDMV", [playlist], [])
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(2.0, 62.0),
             ):
                 parts = _split_extra_playitems(
@@ -574,7 +574,7 @@ class CoreTests(unittest.TestCase):
             )
             disc = Disc("Disc", root / "BDMV", [playlist], [])
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(2.0, 602.0),
             ):
                 self.assertEqual(
@@ -606,19 +606,19 @@ class CoreTests(unittest.TestCase):
             config["discs"] = [{"match": disc.key, "disc_type": "series"}]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00001", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_clip_bounds",
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
                     return_value=(2.0, 1442.0),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_clip_bounds",
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
                     return_value=(2.0, 902.0),
                 ),
             ):
@@ -697,9 +697,9 @@ class CoreTests(unittest.TestCase):
                 {"eng": "English Name", "jpn": "日本語名"},
             )
             with (
-                patch("bdmv_emby.planner._libbluray_main_playlist", return_value=("00000", None)),
+                patch("bdmv_emby_builder.planner._libbluray_main_playlist", return_value=("00000", None)),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 3840, "height": 2160, "codec_name": "hevc"},
                 ),
             ):
@@ -731,11 +731,11 @@ class CoreTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00000", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
             ):
@@ -773,7 +773,7 @@ class CoreTests(unittest.TestCase):
             metadata = bdmv / "META" / "DL"
             metadata.mkdir(parents=True)
             (metadata / "bdmt_jpn.xml").write_text("<discinfo/>", encoding="utf-8")
-            with patch("bdmv_emby.scanner.MAX_BDMT_XML_BYTES", 1):
+            with patch("bdmv_emby_builder.scanner.MAX_BDMT_XML_BYTES", 1):
                 self.assertEqual(read_metadata_titles(bdmv), {})
 
     def test_bdmv_discs_use_natural_volume_order(self) -> None:
@@ -925,11 +925,11 @@ edition = "Director's Cut"
             config = load_config(config_path)
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00000", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
             ):
@@ -970,15 +970,15 @@ edition = "Director's Cut"
                 )
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00000", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_clip_bounds",
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
                     return_value=(2.0, 3602.0),
                 ),
             ):
@@ -1059,11 +1059,11 @@ edition = "Director's Cut"
                 os.chdir(root)
                 with (
                     patch(
-                        "bdmv_emby.planner._libbluray_main_playlist",
+                        "bdmv_emby_builder.planner._libbluray_main_playlist",
                         return_value=("00000", None),
                     ),
                     patch(
-                        "bdmv_emby.planner._probe_playlist_video",
+                        "bdmv_emby_builder.planner._probe_playlist_video",
                         return_value={"width": 1920, "height": 1080},
                     ),
                 ):
@@ -1092,7 +1092,7 @@ edition = "Director's Cut"
             config = load_config(None)
             config["defaults"]["ffprobe"] = "definitely-missing-ffprobe"
             with (
-                patch("bdmv_emby.planner.shutil.which", return_value=None),
+                patch("bdmv_emby_builder.planner.shutil.which", return_value=None),
                 self.assertRaisesRegex(RuntimeError, "ffprobe is unavailable"),
             ):
                 make_plan(
@@ -1208,11 +1208,11 @@ edition = "Director's Cut"
 
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     side_effect=libbluray_choice,
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
             ):
@@ -1285,15 +1285,15 @@ edition = "Director's Cut"
             ]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00001", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_clip_bounds",
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
                     return_value=(2.0, 1442.0),
                 ),
             ):
@@ -1342,11 +1342,11 @@ edition = "Director's Cut"
             ]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00000", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
             ):
@@ -1400,15 +1400,15 @@ edition = "Director's Cut"
             ]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00000", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_clip_bounds",
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
                     return_value=(2.0, 1442.0),
                 ),
             ):
@@ -1439,11 +1439,11 @@ edition = "Director's Cut"
             config["discs"] = [{"match": disc.key, "disc_type": "series"}]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00000", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
             ):
@@ -1482,11 +1482,11 @@ edition = "Director's Cut"
             ]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00000", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
                 self.assertRaisesRegex(ValueError, "overlaps previously planned"),
@@ -1552,7 +1552,7 @@ edition = "Director's Cut"
             "stream_index=2|dts_time=5.000000|pts_time=5.000000\n"
         )
         with patch(
-            "bdmv_emby.builder.subprocess.Popen",
+            "bdmv_emby_builder.builder.subprocess.Popen",
             return_value=FakeProcess(valid),
         ) as popen:
             summary = _validate_packet_timeline(Path("movie.m2ts"), "ffprobe", probe)
@@ -1568,7 +1568,7 @@ edition = "Director's Cut"
             with (
                 self.subTest(pattern=pattern),
                 patch(
-                    "bdmv_emby.builder.subprocess.Popen",
+                    "bdmv_emby_builder.builder.subprocess.Popen",
                     return_value=FakeProcess(payload),
                 ),
                 self.assertRaisesRegex(RuntimeError, pattern),
@@ -1580,7 +1580,7 @@ edition = "Director's Cut"
         subtitle = "2,0.000000\n"
         with (
             patch(
-                "bdmv_emby.builder.subprocess.Popen",
+                "bdmv_emby_builder.builder.subprocess.Popen",
                 return_value=FakeProcess(video + late_audio + subtitle),
             ),
             self.assertRaisesRegex(RuntimeError, "starts 3.000000s after"),
@@ -1617,7 +1617,7 @@ edition = "Director's Cut"
             "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}]
         }
         with (
-            patch("bdmv_emby.builder.subprocess.Popen", return_value=process),
+            patch("bdmv_emby_builder.builder.subprocess.Popen", return_value=process),
             self.assertRaises(KeyboardInterrupt),
         ):
             _validate_packet_timeline(Path("movie.m2ts"), "ffprobe", probe)
@@ -1651,7 +1651,7 @@ edition = "Director's Cut"
             "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}]
         }
         with (
-            patch("bdmv_emby.builder.subprocess.Popen", return_value=process),
+            patch("bdmv_emby_builder.builder.subprocess.Popen", return_value=process),
             self.assertRaisesRegex(RuntimeError, "DTS gap"),
         ):
             _validate_packet_timeline(Path("movie.m2ts"), "ffprobe", probe)
@@ -1686,15 +1686,15 @@ edition = "Director's Cut"
             config["discs"] = [{"match": disc.key, "disc_type": "series"}]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00010", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_clip_bounds",
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
                     return_value=(2.0, 1442.0),
                 ),
             ):
@@ -1752,15 +1752,15 @@ edition = "Director's Cut"
             config["discs"] = [{"match": disc.key, "disc_type": "series"}]
             with (
                 patch(
-                    "bdmv_emby.planner._libbluray_main_playlist",
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
                     return_value=("00010", None),
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_playlist_video",
+                    "bdmv_emby_builder.planner._probe_playlist_video",
                     return_value={"width": 1920, "height": 1080},
                 ),
                 patch(
-                    "bdmv_emby.planner._probe_clip_bounds",
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
                     side_effect=lambda path, *_args: (
                         (2.0, 1442.0)
                         if Path(path).stem == "00000"
@@ -1807,7 +1807,7 @@ edition = "Director's Cut"
             ]
             disc = Disc("Disc", root / "BDMV", [main, *standalone], [])
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(0.0, 1200.0),
             ):
                 self.assertEqual(
@@ -1825,7 +1825,7 @@ edition = "Director's Cut"
                 0,
             )
             with patch(
-                "bdmv_emby.planner._probe_clip_bounds",
+                "bdmv_emby_builder.planner._probe_clip_bounds",
                 return_value=(0.0, 1200.0),
             ):
                 self.assertEqual(
@@ -2036,7 +2036,7 @@ edition = "Director's Cut"
                 {"source": "/disc/a.m2ts", "in_seconds": 2.0, "out_seconds": 8.0}
             ],
         }
-        with patch("bdmv_emby.builder._probe_media", return_value=probe):
+        with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
             operation, _, _ = _resolve_operation(
                 job, Path("movie.m2ts"), {}, "ffprobe"
             )
@@ -2299,10 +2299,10 @@ edition = "Director's Cut"
         usage = type("Usage", (), {"total": 1000, "used": 900, "free": 100})()
         with (
             patch(
-                "bdmv_emby.builder._nearest_existing",
+                "bdmv_emby_builder.builder._nearest_existing",
                 side_effect=[FakeTarget("/volume-a", 1), FakeTarget("/volume-b", 2)],
             ),
-            patch("bdmv_emby.builder.shutil.disk_usage", return_value=usage) as disk_usage,
+            patch("bdmv_emby_builder.builder.shutil.disk_usage", return_value=usage) as disk_usage,
         ):
             _check_batch_free_space(
                 jobs,
@@ -2345,7 +2345,7 @@ edition = "Director's Cut"
                 "disc_blockers": {"Disc": "unparseable playlist on this disc"},
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
-            with patch("bdmv_emby.builder._probe_media", return_value=probe):
+            with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                 results = execute_plan(plan, execute=False)
             self.assertEqual(results[0]["status"], "blocked-directory")
             self.assertIn("unparseable playlist", results[0]["reason"])
@@ -2372,7 +2372,7 @@ edition = "Director's Cut"
             plan_path = root / "plan.json"
             results_path = root / "results.json"
             plan_path.write_text(json.dumps(plan), encoding="utf-8")
-            with patch("bdmv_emby.builder._resolve_tool", return_value="ffprobe"):
+            with patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffprobe"):
                 self.assertEqual(
                     cli_main(
                         [
@@ -2441,7 +2441,7 @@ edition = "Director's Cut"
                 "jobs": [full, segmented],
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
-            with patch("bdmv_emby.builder._probe_media", return_value=probe):
+            with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                 results = execute_plan(plan, execute=False)
             self.assertEqual(
                 [(row["operation"], row["status"]) for row in results],
@@ -2451,7 +2451,7 @@ edition = "Director's Cut"
                 ],
             )
             self.assertTrue(all("requires remux" in row["reason"] for row in results))
-            with patch("bdmv_emby.builder._probe_media", return_value=probe):
+            with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                 only_results = execute_plan(
                     plan, execute=False, only="full"
                 )
@@ -2514,7 +2514,7 @@ edition = "Director's Cut"
                 "jobs": jobs,
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
-            with patch("bdmv_emby.builder._probe_media", return_value=probe):
+            with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                 results = execute_plan(plan, execute=False)
             self.assertEqual(
                 [row["status"] for row in results],
@@ -2556,7 +2556,7 @@ edition = "Director's Cut"
                 "jobs": [job],
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
-            with patch("bdmv_emby.builder._probe_media", return_value=probe):
+            with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                 results = execute_plan(plan, execute=True)
             self.assertEqual(results[0]["status"], "blocked-directory")
             self.assertFalse(output.samefile(source))
@@ -2596,7 +2596,7 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 self.assertRaisesRegex(RuntimeError, "requires an independent file"),
             ):
                 execute_plan(plan, execute=True)
@@ -2641,12 +2641,12 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 self.assertRaisesRegex(RuntimeError, "symbolic link"),
             ):
                 execute_plan(plan, execute=True)
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 self.assertRaisesRegex(RuntimeError, "symbolic link"),
             ):
                 execute_plan(plan, execute=True, overwrite=True)
@@ -2715,7 +2715,7 @@ edition = "Director's Cut"
                 "jobs": [job],
             }
             with (
-                patch("bdmv_emby.builder._resolve_tool", return_value="tool"),
+                patch("bdmv_emby_builder.builder._resolve_tool", return_value="tool"),
                 self.assertRaisesRegex(RuntimeError, "work directory.*symbolic link"),
             ):
                 execute_plan(plan, execute=True)
@@ -3052,9 +3052,9 @@ edition = "Director's Cut"
             long_job["operation"] = "copy"
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 patch(
-                    "bdmv_emby.builder._validate_output",
+                    "bdmv_emby_builder.builder._validate_output",
                     return_value=(10.0, probe, None),
                 ),
             ):
@@ -3202,12 +3202,12 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             if os.name == "nt":
-                with patch("bdmv_emby.builder._probe_media", return_value=probe):
+                with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                     results = execute_plan(plan, execute=True)
             else:
                 previous_umask = os.umask(0o077)
                 try:
-                    with patch("bdmv_emby.builder._probe_media", return_value=probe):
+                    with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                         results = execute_plan(plan, execute=True)
                 finally:
                     os.umask(previous_umask)
@@ -3221,7 +3221,7 @@ edition = "Director's Cut"
             status = inspect_build_state(destination)
             self.assertEqual(status["jobs"][0]["operation"], "hardlink")
             self.assertTrue(status["jobs"][0]["hardlink_verified"])
-            with patch("bdmv_emby.builder._probe_media", return_value=probe):
+            with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                 overwrite_results = execute_plan(
                     plan, execute=True, overwrite=True
                 )
@@ -3272,8 +3272,8 @@ edition = "Director's Cut"
                 raise KeyboardInterrupt
 
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
-                patch("bdmv_emby.builder.shutil.copyfile", side_effect=interrupted_copy),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder.shutil.copyfile", side_effect=interrupted_copy),
                 self.assertRaises(KeyboardInterrupt),
             ):
                 execute_plan(plan, execute=True)
@@ -3347,7 +3347,7 @@ edition = "Director's Cut"
                     ],
                 }
 
-            with patch("bdmv_emby.builder._resolve_tool", return_value="ffprobe"):
+            with patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffprobe"):
                 with self.assertRaisesRegex(RuntimeError, "not safe"):
                     validate_plan(
                         plan_for(
@@ -3380,7 +3380,7 @@ edition = "Director's Cut"
                     with (
                         self.subTest(kind=kind),
                         patch(
-                            "bdmv_emby.builder._probe_media",
+                            "bdmv_emby_builder.builder._probe_media",
                             side_effect=[partial_probe, complete_probe],
                         ),
                         self.assertRaisesRegex(RuntimeError, "complete source"),
@@ -3394,7 +3394,7 @@ edition = "Director's Cut"
                         )
 
                 with patch(
-                    "bdmv_emby.builder._probe_media",
+                    "bdmv_emby_builder.builder._probe_media",
                     side_effect=[complete_probe, complete_probe],
                 ):
                     validate_plan(
@@ -3418,7 +3418,7 @@ edition = "Director's Cut"
                 )
                 cached_plan["jobs"].append(duplicate_job)
                 with patch(
-                    "bdmv_emby.builder._probe_media",
+                    "bdmv_emby_builder.builder._probe_media",
                     side_effect=[complete_probe, complete_probe],
                 ) as probe_media:
                     validate_plan(cached_plan)
@@ -3426,7 +3426,7 @@ edition = "Director's Cut"
 
                 with (
                     patch(
-                        "bdmv_emby.builder._probe_media",
+                        "bdmv_emby_builder.builder._probe_media",
                         side_effect=subprocess.CalledProcessError(1, ["ffprobe"]),
                     ),
                     self.assertRaisesRegex(RuntimeError, "could not verify"),
@@ -3490,8 +3490,8 @@ edition = "Director's Cut"
                     raise KeyboardInterrupt
 
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
-                patch("bdmv_emby.builder.shutil.copyfile", side_effect=copy_then_interrupt),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder.shutil.copyfile", side_effect=copy_then_interrupt),
             ):
                 try:
                     execute_plan(plan, execute=True)
@@ -3559,7 +3559,7 @@ edition = "Director's Cut"
             code = (
                 "import sys,time\n"
                 "from pathlib import Path\n"
-                "from bdmv_emby.builder import _destination_build_lock\n"
+                "from bdmv_emby_builder.builder import _destination_build_lock\n"
                 "destination,entered,release=map(Path,sys.argv[1:])\n"
                 "with _destination_build_lock(destination):\n"
                 " entered.write_text('locked',encoding='utf-8')\n"
@@ -3631,9 +3631,9 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 patch(
-                    "bdmv_emby.builder._validate_output",
+                    "bdmv_emby_builder.builder._validate_output",
                     return_value=(10.0, probe, None),
                 ),
             ):
@@ -3689,9 +3689,9 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 patch(
-                    "bdmv_emby.builder._validate_output",
+                    "bdmv_emby_builder.builder._validate_output",
                     side_effect=[
                         (10.0, probe, None),
                         RuntimeError("validation failed"),
@@ -3839,7 +3839,7 @@ edition = "Director's Cut"
                 return _content_sha256(candidate)
 
             with patch(
-                "bdmv_emby.builder._content_sha256", side_effect=hash_only_inside
+                "bdmv_emby_builder.builder._content_sha256", side_effect=hash_only_inside
             ):
                 row = inspect_build_state(destination)["jobs"][0]
             self.assertTrue(row["relocated"])
@@ -3981,9 +3981,9 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 patch(
-                    "bdmv_emby.builder._validate_output",
+                    "bdmv_emby_builder.builder._validate_output",
                     return_value=(10.0, probe, None),
                 ),
             ):
@@ -4037,7 +4037,7 @@ edition = "Director's Cut"
                 "jobs": [job],
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
-            with patch("bdmv_emby.builder._probe_media", return_value=probe):
+            with patch("bdmv_emby_builder.builder._probe_media", return_value=probe):
                 results = execute_plan(plan, execute=True)
             self.assertEqual(results[0]["status"], "failed")
             self.assertIn("byte-for-byte", results[0]["error"])
@@ -4087,9 +4087,9 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._resolve_tool", return_value="ffmpeg"),
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
-                patch("bdmv_emby.builder._validate_output", return_value=(10.0, probe, None)),
+                patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffmpeg"),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._validate_output", return_value=(10.0, probe, None)),
             ):
                 untrusted = execute_plan(plan, execute=True)
             self.assertEqual(untrusted[0]["status"], "failed")
@@ -4115,10 +4115,10 @@ edition = "Director's Cut"
 
             def execute_existing() -> list[dict[str, object]]:
                 with (
-                    patch("bdmv_emby.builder._resolve_tool", return_value="ffmpeg"),
-                    patch("bdmv_emby.builder._probe_media", return_value=probe),
+                    patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffmpeg"),
+                    patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                     patch(
-                        "bdmv_emby.builder._validate_output",
+                        "bdmv_emby_builder.builder._validate_output",
                         return_value=(10.0, probe, None),
                     ),
                 ):
@@ -4191,9 +4191,9 @@ edition = "Director's Cut"
             }
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
                 patch(
-                    "bdmv_emby.builder._validate_output",
+                    "bdmv_emby_builder.builder._validate_output",
                     return_value=(10.0, probe, None),
                 ),
             ):
@@ -4223,7 +4223,7 @@ edition = "Director's Cut"
                 "operation": "unavailable",
                 "kind": "main",
             }
-            with patch("bdmv_emby.cli.execute_plan", return_value=[mocked_result]):
+            with patch("bdmv_emby_builder.cli.execute_plan", return_value=[mocked_result]):
                 exit_code = cli_main(
                     [
                         "build",
@@ -4484,7 +4484,7 @@ edition = "Director's Cut"
                 encoding="utf-8",
             )
             results_path.write_text('{"complete": true}\n', encoding="utf-8")
-            with patch("bdmv_emby.cli.execute_plan", side_effect=KeyboardInterrupt):
+            with patch("bdmv_emby_builder.cli.execute_plan", side_effect=KeyboardInterrupt):
                 exit_code = cli_main(
                     [
                         "build",
@@ -4544,16 +4544,16 @@ edition = "Director's Cut"
             probe = {"format": {"start_time": "0", "duration": "10"}, "streams": []}
 
             with (
-                patch("bdmv_emby.builder._probe_media", return_value=probe),
-                patch("bdmv_emby.builder.os.link", side_effect=OSError("denied")),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
+                patch("bdmv_emby_builder.builder.os.link", side_effect=OSError("denied")),
                 patch(
-                    "bdmv_emby.builder._check_batch_free_space",
+                    "bdmv_emby_builder.builder._check_batch_free_space",
                     side_effect=lambda _jobs, operations, *_args: self.assertEqual(
                         operations["fallback"][0], "copy"
                     ),
                 ),
                 patch(
-                    "bdmv_emby.builder._validate_output",
+                    "bdmv_emby_builder.builder._validate_output",
                     return_value=(10.0, probe, None),
                 ),
             ):
@@ -4649,7 +4649,7 @@ edition = "Director's Cut"
     def test_bluray_duration_validation_rejects_seamless_gap_output(self) -> None:
         with (
             patch(
-                "bdmv_emby.builder._probe_media",
+                "bdmv_emby_builder.builder._probe_media",
                 return_value={
                     "format": {"duration": "9301.721333"},
                     "streams": [],
@@ -4671,7 +4671,7 @@ edition = "Director's Cut"
     def test_zero_duration_tolerance_remains_strict(self) -> None:
         with (
             patch(
-                "bdmv_emby.builder._probe_media",
+                "bdmv_emby_builder.builder._probe_media",
                 return_value={
                     "format": {"duration": "100.001"},
                     "streams": [],
@@ -4862,7 +4862,7 @@ edition = "Director's Cut"
                     )
                 )
 
-            with patch("bdmv_emby.builder._mkv_audio_overrides", return_value=[]):
+            with patch("bdmv_emby_builder.builder._mkv_audio_overrides", return_value=[]):
                 for job, concat_path, metadata_path in jobs:
                     _concat_remux_command(
                         job,

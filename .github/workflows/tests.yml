@@ -32,13 +32,16 @@ jobs:
         run: python -c "from pathlib import Path; assert len(list(Path('dist').glob('*.whl'))) == 1; assert len(list(Path('dist').glob('*.tar.gz'))) == 1"
 
       - name: Verify source distribution contents
-        run: python -c "import tarfile; from pathlib import Path; names=tarfile.open(next(Path('dist').glob('*.tar.gz'))).getnames(); assert any(n.endswith('/config.example.toml') for n in names); assert any('/docs/' in n for n in names)"
+        run: python -c "import tarfile; from pathlib import Path; names=tarfile.open(next(Path('dist').glob('*.tar.gz'))).getnames(); assert any(n.endswith('/config.example.toml') for n in names); assert any('/docs/' in n for n in names); assert any('/src/bdmv_emby_builder/' in n for n in names)"
 
       - name: Install built wheel
         run: python -c "import subprocess, sys; from pathlib import Path; subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps', '--force-reinstall', str(next(Path('dist').glob('*.whl')))], check=True)"
 
+      - name: Verify installed import package
+        run: python -c "import bdmv_emby_builder; import importlib.util; assert importlib.util.find_spec('bdmv_emby') is None"
+
       - name: Smoke-test installed command
-        run: bdmv-emby --help
+        run: bdmv-emby-builder --help
 
       - name: Install FFmpeg on Linux
         if: runner.os == 'Linux'
@@ -54,7 +57,7 @@ jobs:
         run: choco install ffmpeg --yes --no-progress
 
       - name: Compile sources
-        run: python -m compileall -q bdmv_emby tests
+        run: python -m compileall -q src/bdmv_emby_builder tests
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v

@@ -21,12 +21,12 @@ classifiers = [
 ]
 
 [project.scripts]
-bdmv-emby = "bdmv_emby.cli:main"
+bdmv-emby-builder = "bdmv_emby_builder.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Kectai/bdmv-emby-builder"
 Repository = "https://github.com/Kectai/bdmv-emby-builder"
 Issues = "https://github.com/Kectai/bdmv-emby-builder/issues"
 
-[tool.setuptools]
-packages = ["bdmv_emby"]
+[tool.setuptools.packages.find]
+where = ["src"]
