@@ -31,6 +31,7 @@ from bdmv_emby_builder.builder import (
     _relocation_candidates,
     _stream_signature,
     _validate_packet_timeline,
+    _validate_derived_episode_partitions,
     _validate_output,
     _validate_plan_paths,
     execute_plan,
@@ -39,6 +40,11 @@ from bdmv_emby_builder.builder import (
     inspect_build_state,
     validate_plan,
 )
+from bdmv_emby_builder.episode import (
+    partition_episode_chapters,
+    partition_episode_playitems,
+)
+from bdmv_emby_builder.limits import MAX_EPISODE_INFERENCE_BOUNDARIES
 from bdmv_emby_builder.cli import main as cli_main
 from bdmv_emby_builder.mpls import (
     PlayItem,
@@ -48,9 +54,17 @@ from bdmv_emby_builder.mpls import (
     parse_mpls,
 )
 from bdmv_emby_builder.planner import (
+    _analyze_extra_for_review,
+    _apply_extra_content_analysis,
     _collection_group_keys,
+    _disc_title,
     _extract_season_marker,
+    _fallback_movie_name,
+    _parse_volume_detect,
+    _probe_extra_static_samples,
     _separate_episode_playlists,
+    _series_title,
+    _split_episode_chapters,
     _split_episode_playitems,
     _split_extra_playitems,
     _safe_component,
@@ -375,6 +389,286 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(
             _split_episode_playitems(playlist, disc, "ffprobe", {}, 0.1), []
         )
+
+    def test_complete_playitems_are_grouped_by_peer_episode_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            items = []
+            marks = []
+            item_ticks = 288 * 45_000
+            for index in range(15):
+                clip_id = f"{index:05d}"
+                (stream_dir / f"{clip_id}.m2ts").touch()
+                item = PlayItem(
+                    index,
+                    clip_id,
+                    "M2TS",
+                    90_000,
+                    90_000 + item_ticks,
+                    1 if index % 5 == 0 else 5,
+                )
+                items.append(item)
+                marks.append(PlaylistMark(1, index, item.in_ticks))
+            playlist = Playlist(
+                "00001", root / "BDMV/PLAYLIST/00001.mpls", items, marks, 0
+            )
+            disc = Disc("Disc", root / "BDMV", [playlist], [])
+            with patch(
+                "bdmv_emby_builder.planner._probe_clip_bounds",
+                return_value=(2.0, 290.0),
+            ):
+                parts = _split_episode_playitems(
+                    playlist, disc, "ffprobe", {}, 0.1, 1440.0
+                )
+            self.assertEqual(
+                [part.playlist_id for part, _ in parts],
+                ["00001-P01-05", "00001-P06-10", "00001-P11-15"],
+            )
+            self.assertEqual([len(part.items) for part, _ in parts], [5, 5, 5])
+            self.assertEqual([offset for _, offset in parts], [0.0, 1440.0, 2880.0])
+
+    def test_repeated_tail_to_head_resets_group_episodes_without_peers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            durations = [700, 700, 20] * 3
+            items = []
+            marks = []
+            for index, duration in enumerate(durations):
+                clip_id = f"{index:05d}"
+                (stream_dir / f"{clip_id}.m2ts").touch()
+                item = PlayItem(
+                    index,
+                    clip_id,
+                    "M2TS",
+                    90_000,
+                    90_000 + duration * 45_000,
+                    1 if index % 3 == 0 else 5,
+                )
+                items.append(item)
+                marks.append(PlaylistMark(1, index, item.in_ticks))
+            playlist = Playlist(
+                "00001", root / "BDMV/PLAYLIST/00001.mpls", items, marks, 0
+            )
+            disc = Disc("Disc", root / "BDMV", [playlist], [])
+
+            def clip_bounds(path: Path, *_args: object) -> tuple[float, float]:
+                return (2.0, 2.0 + durations[int(Path(path).stem)])
+
+            with patch(
+                "bdmv_emby_builder.planner._probe_clip_bounds",
+                side_effect=clip_bounds,
+            ):
+                parts = _split_episode_playitems(
+                    playlist, disc, "ffprobe", {}, 0.1
+                )
+            self.assertEqual(
+                [part.playlist_id for part, _ in parts],
+                ["00001-P01-03", "00001-P04-06", "00001-P07-09"],
+            )
+
+    def test_single_m2ts_uses_authored_episode_subplaylists_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            playlist_dir = root / "BDMV" / "PLAYLIST"
+            stream_dir.mkdir(parents=True)
+            playlist_dir.mkdir(parents=True)
+            (stream_dir / "00000.m2ts").touch()
+            episode_ticks = 1200 * 45_000
+            parent = Playlist(
+                "00001",
+                playlist_dir / "00001.mpls",
+                [PlayItem(0, "00000", "M2TS", 90_000, 90_000 + 2 * episode_ticks)],
+                [
+                    PlaylistMark(1, 0, 90_000),
+                    PlaylistMark(1, 0, 90_000 + episode_ticks),
+                ],
+                0,
+            )
+            episodes = [
+                Playlist(
+                    f"{index + 2:05d}",
+                    playlist_dir / f"{index + 2:05d}.mpls",
+                    [
+                        PlayItem(
+                            0,
+                            "00000",
+                            "M2TS",
+                            90_000 + index * episode_ticks,
+                            90_000 + (index + 1) * episode_ticks,
+                        )
+                    ],
+                    [PlaylistMark(1, 0, 90_000 + index * episode_ticks)],
+                    0,
+                )
+                for index in range(2)
+            ]
+            disc = Disc("Disc", root / "BDMV", [parent, *episodes], [])
+            parts = _separate_episode_playlists(
+                [parent, *episodes], parent, disc, "ffprobe", {}, 0.1
+            )
+            self.assertEqual(
+                [playlist.playlist_id for playlist, _ in parts], ["00002", "00003"]
+            )
+
+    def test_episode_groups_can_mix_single_and_multi_clip_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            durations = [1440, *([288] * 10)]
+            items = []
+            marks = []
+            for index, duration in enumerate(durations):
+                clip_id = f"{index:05d}"
+                (stream_dir / f"{clip_id}.m2ts").touch()
+                item = PlayItem(
+                    index,
+                    clip_id,
+                    "M2TS",
+                    90_000,
+                    90_000 + duration * 45_000,
+                    1 if index in {0, 1, 6} else 5,
+                )
+                items.append(item)
+                marks.append(PlaylistMark(1, index, item.in_ticks))
+            playlist = Playlist(
+                "00001", root / "BDMV/PLAYLIST/00001.mpls", items, marks, 0
+            )
+            disc = Disc("Disc", root / "BDMV", [playlist], [])
+
+            def clip_bounds(path: Path, *_args: object) -> tuple[float, float]:
+                index = int(Path(path).stem)
+                return (2.0, 2.0 + durations[index])
+
+            with patch(
+                "bdmv_emby_builder.planner._probe_clip_bounds",
+                side_effect=clip_bounds,
+            ):
+                parts = _split_episode_playitems(
+                    playlist, disc, "ffprobe", {}, 0.1, 1440.0
+                )
+            self.assertEqual(
+                [part.playlist_id for part, _ in parts],
+                ["00001-P01-01", "00001-P02-06", "00001-P07-11"],
+            )
+            self.assertEqual([len(part.items) for part, _ in parts], [1, 5, 5])
+
+    def test_single_m2ts_can_split_on_repeated_authored_chapter_pattern(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            source = stream_dir / "00000.m2ts"
+            source.touch()
+            interval_seconds = [90, 600, 600, 90, 60] * 3
+            starts = [0]
+            for duration in interval_seconds[:-1]:
+                starts.append(starts[-1] + duration * 45_000)
+            parent_in = 90_000
+            playlist = Playlist(
+                "00001",
+                root / "BDMV/PLAYLIST/00001.mpls",
+                [
+                    PlayItem(
+                        0,
+                        "00000",
+                        "M2TS",
+                        parent_in,
+                        parent_in + sum(interval_seconds) * 45_000,
+                    )
+                ],
+                [PlaylistMark(1, 0, parent_in + start) for start in starts],
+                0,
+            )
+            disc = Disc("Disc", root / "BDMV", [playlist], [])
+            with patch(
+                "bdmv_emby_builder.planner._probe_clip_bounds",
+                return_value=(2.0, 4322.0),
+            ):
+                parts = _split_episode_chapters(
+                    playlist, disc, "ffprobe", {}, 0.1
+                )
+            self.assertEqual(
+                [part.playlist_id for part, _ in parts],
+                ["00001-C01-06", "00001-C06-11", "00001-C11-16"],
+            )
+            self.assertEqual(
+                [part.duration_seconds for part, _ in parts],
+                [1440.0, 1440.0, 1440.0],
+            )
+            self.assertEqual([offset for _, offset in parts], [0.0, 1440.0, 2880.0])
+
+    def test_uniform_chapters_do_not_imply_multiple_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            (stream_dir / "00000.m2ts").touch()
+            parent_in = 90_000
+            chapter_ticks = 300 * 45_000
+            playlist = Playlist(
+                "00001",
+                root / "BDMV/PLAYLIST/00001.mpls",
+                [
+                    PlayItem(
+                        0,
+                        "00000",
+                        "M2TS",
+                        parent_in,
+                        parent_in + 8 * chapter_ticks,
+                    )
+                ],
+                [
+                    PlaylistMark(1, 0, parent_in + index * chapter_ticks)
+                    for index in range(8)
+                ],
+                0,
+            )
+            disc = Disc("Disc", root / "BDMV", [playlist], [])
+            with patch(
+                "bdmv_emby_builder.planner._probe_clip_bounds",
+                return_value=(2.0, 2402.0),
+            ):
+                self.assertEqual(
+                    _split_episode_chapters(
+                        playlist, disc, "ffprobe", {}, 0.1
+                    ),
+                    [],
+                )
+
+    def test_ambiguous_repeated_chapter_partitions_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            (stream_dir / "00000.m2ts").touch()
+            intervals = [300, 600] * 4
+            starts = [0]
+            for duration in intervals[:-1]:
+                starts.append(starts[-1] + duration * 45_000)
+            playlist = Playlist(
+                "00001",
+                root / "BDMV/PLAYLIST/00001.mpls",
+                [PlayItem(0, "00000", "M2TS", 0, sum(intervals) * 45_000)],
+                [PlaylistMark(1, 0, start) for start in starts],
+                0,
+            )
+            disc = Disc("Disc", root / "BDMV", [playlist], [])
+            with patch(
+                "bdmv_emby_builder.planner._probe_clip_bounds",
+                return_value=(0.0, float(sum(intervals))),
+            ):
+                self.assertEqual(
+                    _split_episode_chapters(
+                        playlist, disc, "ffprobe", {}, 0.1
+                    ),
+                    [],
+                )
 
     def test_play_all_extras_split_at_complete_marked_playitems(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -715,6 +1009,212 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(job["playlist_selection"], "ffmpeg_libbluray_relevant_longest")
             self.assertEqual(job["version"], "4K")
             self.assertEqual(job["relative_output"], "日本語名/日本語名 - 4K.m2ts")
+
+    def test_directory_title_removes_generic_leading_release_tags(self) -> None:
+        disc = Disc(
+            "[BDMV][130306] Example Series Disc6",
+            Path("/source/BDMV"),
+            [],
+            [],
+        )
+        self.assertEqual(
+            _disc_title(disc),
+            ("Example Series Disc6", "directory_name"),
+        )
+        self.assertEqual(
+            _series_title(disc),
+            ("Example Series", "directory_name_volume_suffix_removed"),
+        )
+
+    def test_directory_title_preserves_nontechnical_bracketed_title(self) -> None:
+        self.assertEqual(
+            _fallback_movie_name("[Example Title] Disc1"),
+            "[Example Title] Disc1",
+        )
+        self.assertEqual(_fallback_movie_name("[BDMV]"), "[BDMV]")
+
+    def test_volume_detect_parser_handles_finite_and_digital_silence(self) -> None:
+        self.assertEqual(
+            _parse_volume_detect(
+                "mean_volume: -71.4 dB\nmax_volume: -67.4 dB\n"
+            ),
+            {
+                "audio_stream_count": 1,
+                "mean_volume_db": -71.4,
+                "max_volume_db": -67.4,
+            },
+        )
+        self.assertEqual(
+            _parse_volume_detect(
+                "mean_volume: -inf dB\nmax_volume: -inf dB\n"
+            ),
+            {
+                "audio_stream_count": 1,
+                "mean_volume_db": None,
+                "max_volume_db": None,
+            },
+        )
+        self.assertIsNone(_parse_volume_detect("unrelated ffmpeg output"))
+
+    def test_volume_detect_parser_uses_loudest_of_all_audio_streams(self) -> None:
+        self.assertEqual(
+            _parse_volume_detect(
+                "mean_volume: -90.3 dB\n"
+                "mean_volume: -21.1 dB\n"
+                "max_volume: -90.3 dB\n"
+                "max_volume: -18.0 dB\n"
+            ),
+            {
+                "audio_stream_count": 2,
+                "mean_volume_db": -21.1,
+                "max_volume_db": -18.0,
+            },
+        )
+
+    def test_active_audio_skips_static_video_analysis(self) -> None:
+        job = {
+            "duration_seconds": 90.0,
+            "items": [{"source": "/source/extra.m2ts"}],
+        }
+        with (
+            patch(
+                "bdmv_emby_builder.planner._probe_extra_audio_volume",
+                return_value={
+                    "audio_stream_count": 1,
+                    "mean_volume_db": -24.0,
+                    "max_volume_db": -3.0,
+                },
+            ),
+            patch(
+                "bdmv_emby_builder.planner._probe_extra_static_samples"
+            ) as static_probe,
+        ):
+            status, evidence = _analyze_extra_for_review(job, "ffmpeg")
+        self.assertEqual(status, "clear")
+        self.assertIsNone(evidence)
+        static_probe.assert_not_called()
+
+    def test_near_silent_static_extra_requires_review_without_exclusion(self) -> None:
+        job = {
+            "duration_seconds": 63.0,
+            "items": [{"source": "/source/extra.m2ts"}],
+        }
+        with (
+            patch(
+                "bdmv_emby_builder.planner._probe_extra_audio_volume",
+                return_value={
+                    "audio_stream_count": 1,
+                    "mean_volume_db": -71.4,
+                    "max_volume_db": -67.4,
+                },
+            ),
+            patch(
+                "bdmv_emby_builder.planner._probe_extra_static_samples",
+                return_value={
+                    "sample_count": 3,
+                    "static_sample_count": 3,
+                    "sample_duration_seconds": 3.0,
+                    "sample_starts_seconds": [11.1, 30.0, 48.9],
+                },
+            ),
+        ):
+            status, evidence = _analyze_extra_for_review(job, "ffmpeg")
+        self.assertEqual(status, "review")
+        self.assertEqual(evidence["status"], "needs_review")
+        self.assertEqual(
+            evidence["reason"], "near_silent_and_mostly_static"
+        )
+        self.assertFalse(evidence["automatic_exclusion"])
+        self.assertTrue(evidence["audio"]["near_silent"])
+        self.assertTrue(evidence["video"]["mostly_static"])
+
+    def test_video_only_static_extra_requires_review(self) -> None:
+        job = {
+            "duration_seconds": 63.0,
+            "items": [{"source": "/source/extra.m2ts"}],
+        }
+        with (
+            patch(
+                "bdmv_emby_builder.planner._probe_extra_audio_volume",
+                return_value={
+                    "audio_stream_count": 0,
+                    "mean_volume_db": None,
+                    "max_volume_db": None,
+                },
+            ),
+            patch(
+                "bdmv_emby_builder.planner._probe_extra_static_samples",
+                return_value={
+                    "sample_count": 3,
+                    "static_sample_count": 3,
+                    "sample_duration_seconds": 3.0,
+                    "sample_starts_seconds": [11.1, 30.0, 48.9],
+                },
+            ),
+        ):
+            status, evidence = _analyze_extra_for_review(job, "ffmpeg")
+        self.assertEqual(status, "review")
+        self.assertEqual(evidence["audio"]["audio_stream_count"], 0)
+        self.assertTrue(evidence["audio"]["near_silent"])
+
+    def test_static_probe_uses_a_conservative_freeze_threshold(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch(
+            "bdmv_emby_builder.planner.subprocess.run",
+            return_value=completed,
+        ) as run:
+            result = _probe_extra_static_samples(
+                Path("/source/dynamic.m2ts"), 12.0, "ffmpeg"
+            )
+        self.assertEqual(result["static_sample_count"], 0)
+        self.assertEqual(run.call_count, 3)
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertIn("freezedetect=n=-60dB:d=1.5", command)
+
+    def test_extra_content_analysis_adds_auditable_plan_warning(self) -> None:
+        job = {
+            "disc": "Example Disc",
+            "playlist": "00002",
+            "playlist_segment": "00002-P01",
+            "kind": "extras",
+        }
+        evidence = {
+            "status": "needs_review",
+            "suspected_category": "system_content",
+            "reason": "near_silent_and_mostly_static",
+            "automatic_exclusion": False,
+        }
+        warnings: list[str] = []
+        with (
+            patch(
+                "bdmv_emby_builder.planner._extra_job_covers_complete_source",
+                return_value=True,
+            ),
+            patch(
+                "bdmv_emby_builder.planner._resolve_optional_ffmpeg",
+                return_value="ffmpeg",
+            ),
+            patch(
+                "bdmv_emby_builder.planner._analyze_extra_for_review",
+                return_value=("review", evidence),
+            ),
+        ):
+            summary = _apply_extra_content_analysis(
+                [job],
+                {"copy_boundary_tolerance_seconds": 0.1},
+                "ffprobe",
+                {},
+                warnings,
+            )
+        self.assertEqual(summary["eligible_count"], 1)
+        self.assertEqual(summary["analyzed_count"], 1)
+        self.assertEqual(summary["needs_review_count"], 1)
+        self.assertEqual(job["content_review"], evidence)
+        self.assertIn("00002-P01", warnings[0])
+        self.assertIn("not automatically excluded", warnings[0])
 
     def test_long_planned_filename_includes_extension_within_portable_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1377,6 +1877,120 @@ edition = "Director's Cut"
                 any("no explicit season marker" in warning for warning in plan["warnings"])
             )
 
+    def test_series_duration_profile_plans_multi_clip_episode_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "source"
+            discs = []
+            for disc_number, item_count, item_seconds in ((1, 2, 1440), (2, 15, 288)):
+                root = source_root / "Show" / f"Disc{disc_number}"
+                stream_dir = root / "BDMV" / "STREAM"
+                playlist_dir = root / "BDMV" / "PLAYLIST"
+                stream_dir.mkdir(parents=True)
+                playlist_dir.mkdir(parents=True)
+                items = []
+                marks = []
+                for index in range(item_count):
+                    clip_id = f"{index:05d}"
+                    (stream_dir / f"{clip_id}.m2ts").touch()
+                    condition = 1
+                    if disc_number == 2 and index % 5:
+                        condition = 5
+                    item = PlayItem(
+                        index,
+                        clip_id,
+                        "M2TS",
+                        90_000,
+                        90_000 + item_seconds * 45_000,
+                        condition,
+                    )
+                    items.append(item)
+                    marks.append(PlaylistMark(1, index, item.in_ticks))
+                playlist = Playlist(
+                    "00001", playlist_dir / "00001.mpls", items, marks, 0
+                )
+                self._write_mpls(
+                    playlist.path,
+                    [
+                        (
+                            item.clip_id,
+                            item.in_ticks,
+                            item.out_ticks,
+                            item.connection_condition,
+                        )
+                        for item in items
+                    ],
+                    [(mark.play_item_ref, mark.mark_ticks) for mark in marks],
+                )
+                discs.append(
+                    Disc(
+                        f"Show/Disc{disc_number}",
+                        root / "BDMV",
+                        [playlist],
+                        [],
+                        {"jpn": f"Show Disc {disc_number}"},
+                    )
+                )
+            config = load_config(None)
+            config["discs"] = [
+                {
+                    "match": disc.key,
+                    "disc_type": "series",
+                    "library_dir": "Show",
+                    "season_number": 1,
+                }
+                for disc in discs
+            ]
+
+            def clip_bounds(path: Path, *_args: object) -> tuple[float, float]:
+                return (2.0, 1442.0) if "Disc1" in str(path) else (2.0, 290.0)
+
+            with (
+                patch(
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
+                    return_value=("00001", None),
+                ),
+                patch(
+                    "bdmv_emby_builder.planner._probe_playlist_video",
+                    return_value={"width": 1920, "height": 1080},
+                ),
+                patch(
+                    "bdmv_emby_builder.planner._probe_clip_bounds",
+                    side_effect=clip_bounds,
+                ),
+            ):
+                plan = make_plan(discs, source_root, Path(tmp) / "out", config)
+
+            episodes = [job for job in plan["jobs"] if job["kind"] == "episode"]
+            self.assertEqual(len(episodes), 5)
+            grouped = episodes[2:]
+            self.assertEqual(
+                [job["playlist_segment"] for job in grouped],
+                ["00001-P01-05", "00001-P06-10", "00001-P11-15"],
+            )
+            self.assertTrue(
+                all(job["playlist_selection"] == "episode_playitem_group" for job in grouped)
+            )
+            self.assertTrue(
+                all(job["required_remux_backend"] == "concat" for job in grouped)
+            )
+            self.assertTrue(all(job["operation"] == "remux_m2ts" for job in grouped))
+
+            def media_probe(path: str, *_args: object) -> dict[str, object]:
+                duration = 1440 if "Disc1" in str(path) else 288
+                return {
+                    "format": {"start_time": "2", "duration": str(duration)},
+                    "streams": [],
+                }
+
+            with (
+                patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffprobe"),
+                patch(
+                    "bdmv_emby_builder.builder._probe_media",
+                    side_effect=media_probe,
+                ),
+            ):
+                validate_plan(plan)
+
     def test_configured_season_and_episode_start_override_inference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_root = Path(tmp) / "source"
@@ -1515,7 +2129,7 @@ edition = "Director's Cut"
             "ffmpeg",
         )
         threshold_index = command.index("-dts_delta_threshold")
-        self.assertEqual(command[threshold_index + 1], "1")
+        self.assertEqual(command[threshold_index + 1], "0.25")
         self.assertLess(threshold_index, command.index("-i"))
         self.assertNotIn("-copyts", command)
 
@@ -3439,6 +4053,365 @@ edition = "Director's Cut"
                         )
                     )
 
+    def test_plan_revalidates_multi_playitem_episode_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            destination = root / "destination"
+            bdmv = self._bdmv_layout(source_root)
+            raw_items = []
+            marks = []
+            serialized_groups: list[list[dict[str, object]]] = [[], []]
+            for index in range(10):
+                clip_id = f"{index:05d}"
+                source = bdmv / "STREAM" / f"{clip_id}.m2ts"
+                source.touch()
+                condition = 1 if index in {0, 5} else 5
+                duration_seconds = 20 if index % 5 == 4 else 355
+                duration_ticks = duration_seconds * 45_000
+                raw_items.append((clip_id, 0, duration_ticks, condition))
+                marks.append((index, 0))
+                serialized_groups[index // 5].append(
+                    {
+                        "clip_id": clip_id,
+                        "source": str(source),
+                        "source_size": 0,
+                        "in_ticks": 0,
+                        "out_ticks": duration_ticks,
+                        "in_seconds": 0.0,
+                        "out_seconds": float(duration_seconds),
+                        "connection_condition": condition,
+                        "is_multi_angle": False,
+                        "stc_id": 0,
+                    }
+                )
+            mpls_path = bdmv / "PLAYLIST" / "00001.mpls"
+            self._write_mpls(mpls_path, raw_items, marks)
+            job = {
+                "id": "grouped-episode",
+                "disc": "Disc",
+                "kind": "episode",
+                "playlist_selection": "episode_playitem_group",
+                "processing": "copy_remux",
+                "operation": "remux_m2ts",
+                "required_remux_backend": "concat",
+                "episode_duration_hint_seconds": None,
+                "playlist": "00001",
+                "playlist_segment": "00001-P01-05",
+                "playlist_start_seconds": 0.0,
+                "bdmv_path": str(bdmv),
+                "mpls_path": str(mpls_path),
+                "relative_output": "Show/Season 01/Show - S01E01.m2ts",
+                "output": str(
+                    destination / "Show/Season 01/Show - S01E01.m2ts"
+                ),
+                "items": serialized_groups[0],
+                "missing_sources": [],
+                "duration_seconds": 1440.0,
+                "subpath_count": 0,
+                "subpath_types": [],
+                "chapter_ticks": [0, 355, 710, 1065, 1420],
+            }
+            job["chapter_ticks"] = [
+                seconds * 45_000 for seconds in job["chapter_ticks"]
+            ]
+            second_job = json.loads(json.dumps(job))
+            second_job.update(
+                {
+                    "id": "grouped-episode-2",
+                    "playlist_segment": "00001-P06-10",
+                    "playlist_start_seconds": 1440.0,
+                    "relative_output": "Show/Season 01/Show - S01E02.m2ts",
+                    "output": str(
+                        destination / "Show/Season 01/Show - S01E02.m2ts"
+                    ),
+                    "items": serialized_groups[1],
+                }
+            )
+            plan = {
+                "schema_version": 7,
+                "source_root": str(source_root),
+                "destination_root": str(destination),
+                "settings": {},
+                "jobs": [job, second_job],
+            }
+
+            def probe_media(path: str, *_args: object) -> dict[str, object]:
+                duration = 20 if int(Path(path).stem) % 5 == 4 else 355
+                return {
+                    "format": {"start_time": "0", "duration": str(duration)},
+                    "streams": [],
+                }
+
+            with (
+                patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffprobe"),
+                patch(
+                    "bdmv_emby_builder.builder._probe_media",
+                    side_effect=probe_media,
+                ),
+            ):
+                validate_plan(plan)
+
+            tampered = json.loads(json.dumps(plan))
+            tampered["jobs"][0]["required_remux_backend"] = None
+            with (
+                patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffprobe"),
+                patch(
+                    "bdmv_emby_builder.builder._probe_media",
+                    side_effect=probe_media,
+                ),
+                self.assertRaisesRegex(RuntimeError, "planner-verifiable"),
+            ):
+                validate_plan(tampered)
+
+            for incompatible_operation in ("copy", "remux_mkv"):
+                with self.subTest(operation=incompatible_operation):
+                    tampered_operation = json.loads(json.dumps(plan))
+                    tampered_operation["jobs"][0]["operation"] = (
+                        incompatible_operation
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "requires concat.*incompatible"
+                    ):
+                        validate_plan(tampered_operation)
+
+                    with self.assertRaisesRegex(
+                        RuntimeError, "required concat is incompatible"
+                    ):
+                        _resolve_operation(
+                            tampered_operation["jobs"][0],
+                            Path(tampered_operation["jobs"][0]["output"]),
+                            {},
+                            "ffprobe",
+                        )
+
+    def test_plan_revalidates_single_m2ts_chapter_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            destination = root / "destination"
+            bdmv = self._bdmv_layout(source_root)
+            source = bdmv / "STREAM" / "00000.m2ts"
+            source.touch()
+            parent_ticks = 2880 * 45_000
+            episode_intervals = [90, 600, 600, 90, 60]
+            chapter_seconds = [0]
+            for duration in (episode_intervals * 2)[:-1]:
+                chapter_seconds.append(chapter_seconds[-1] + duration)
+            mpls_path = bdmv / "PLAYLIST" / "00001.mpls"
+            self._write_mpls(
+                mpls_path,
+                [("00000", 0, parent_ticks, 1)],
+                [(0, seconds * 45_000) for seconds in chapter_seconds],
+            )
+            first_episode_chapters = [0]
+            for duration in episode_intervals[:-1]:
+                first_episode_chapters.append(
+                    first_episode_chapters[-1] + duration * 45_000
+                )
+            job = {
+                "id": "chapter-episode",
+                "disc": "Disc",
+                "kind": "episode",
+                "playlist_selection": "episode_chapter_split",
+                "processing": "copy_remux",
+                "operation": "auto",
+                "required_remux_backend": "concat",
+                "episode_duration_hint_seconds": None,
+                "playlist": "00001",
+                "playlist_segment": "00001-C01-06",
+                "playlist_start_seconds": 0.0,
+                "bdmv_path": str(bdmv),
+                "mpls_path": str(mpls_path),
+                "relative_output": "Show/Season 01/Show - S01E01.m2ts",
+                "output": str(
+                    destination / "Show/Season 01/Show - S01E01.m2ts"
+                ),
+                "items": [
+                    {
+                        "clip_id": "00000",
+                        "source": str(source),
+                        "source_size": 0,
+                        "in_ticks": 0,
+                        "out_ticks": 1440 * 45_000,
+                        "in_seconds": 0.0,
+                        "out_seconds": 1440.0,
+                        "connection_condition": 1,
+                        "is_multi_angle": False,
+                        "stc_id": 0,
+                    }
+                ],
+                "missing_sources": [],
+                "duration_seconds": 1440.0,
+                "subpath_count": 0,
+                "subpath_types": [],
+                "chapter_ticks": first_episode_chapters,
+            }
+            second_job = json.loads(json.dumps(job))
+            second_job.update(
+                {
+                    "id": "chapter-episode-2",
+                    "playlist_segment": "00001-C06-11",
+                    "playlist_start_seconds": 1440.0,
+                    "relative_output": "Show/Season 01/Show - S01E02.m2ts",
+                    "output": str(
+                        destination / "Show/Season 01/Show - S01E02.m2ts"
+                    ),
+                    "items": [
+                        {
+                            **job["items"][0],
+                            "in_ticks": 1440 * 45_000,
+                            "out_ticks": 2880 * 45_000,
+                            "in_seconds": 1440.0,
+                            "out_seconds": 2880.0,
+                        }
+                    ],
+                }
+            )
+            plan = {
+                "schema_version": 7,
+                "source_root": str(source_root),
+                "destination_root": str(destination),
+                "settings": {},
+                "jobs": [job, second_job],
+            }
+            probe = {
+                "format": {"start_time": "0", "duration": "2880"},
+                "streams": [],
+            }
+            with (
+                patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffprobe"),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
+            ):
+                validate_plan(plan)
+
+            tampered = json.loads(json.dumps(plan))
+            for planned_job in tampered["jobs"]:
+                planned_job["episode_duration_hint_seconds"] = 1200.0
+            with (
+                patch("bdmv_emby_builder.builder._resolve_tool", return_value="ffprobe"),
+                patch("bdmv_emby_builder.builder._probe_media", return_value=probe),
+                self.assertRaisesRegex(RuntimeError, "peer profile"),
+            ):
+                validate_plan(tampered)
+
+            orphan_backend = json.loads(json.dumps(plan))
+            orphan_backend["jobs"][0]["playlist_segment"] = None
+            with self.assertRaisesRegex(RuntimeError, "without a playlist_segment"):
+                validate_plan(orphan_backend)
+            with self.assertRaisesRegex(
+                RuntimeError, "required concat lacks a validated"
+            ):
+                _resolve_operation(
+                    orphan_backend["jobs"][0],
+                    Path(orphan_backend["jobs"][0]["output"]),
+                    {},
+                    "ffprobe",
+                )
+
+    def test_builder_rejects_uniform_chapter_partition_not_proven_by_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mpls_path = Path(tmp) / "00001.mpls"
+            total_seconds = 2400
+            self._write_mpls(
+                mpls_path,
+                [("00000", 0, total_seconds * 45_000, 1)],
+                [(0, seconds * 45_000) for seconds in range(0, total_seconds, 300)],
+            )
+            jobs = [
+                {
+                    "relative_output": f"Show/Season 01/Show - S01E{index:02d}.m2ts",
+                    "mpls_path": str(mpls_path),
+                    "playlist_selection": "episode_chapter_split",
+                    "playlist_segment": segment,
+                    "episode_duration_hint_seconds": None,
+                }
+                for index, segment in enumerate(
+                    ("00001-C01-05", "00001-C05-09"), 1
+                )
+            ]
+            with self.assertRaisesRegex(RuntimeError, "complete.*partition"):
+                _validate_derived_episode_partitions(jobs, 0.1)
+
+    def test_episode_inference_bounds_adversarial_playlist_size(self) -> None:
+        count = MAX_EPISODE_INFERENCE_BOUNDARIES + 1
+        items = [
+            PlayItem(index, f"{index:05d}", "M2TS", 0, 45_000, 1)
+            for index in range(count)
+        ]
+        marks = [PlaylistMark(1, index, 0) for index in range(count)]
+        playitem_playlist = Playlist(
+            "00001", Path("/source/00001.mpls"), items, marks, 0
+        )
+        self.assertEqual(
+            partition_episode_playitems(playitem_playlist, 1200.0, 0.1), []
+        )
+        oversized_disc = Disc(
+            "Show/Disc", Path("/source/BDMV"), [playitem_playlist], []
+        )
+        with patch(
+            "bdmv_emby_builder.planner._item_covers_complete_clip"
+        ) as complete_clip:
+            self.assertEqual(
+                _split_episode_playitems(
+                    playitem_playlist,
+                    oversized_disc,
+                    "ffprobe",
+                    {},
+                    0.1,
+                    1200.0,
+                ),
+                [],
+            )
+        complete_clip.assert_not_called()
+
+        chapter_playlist = Playlist(
+            "00002",
+            Path("/source/00002.mpls"),
+            [PlayItem(0, "00000", "M2TS", 0, count * 45_000, 1)],
+            [PlaylistMark(1, 0, index * 45_000) for index in range(count)],
+            0,
+        )
+        self.assertEqual(
+            partition_episode_chapters(chapter_playlist, 1200.0), []
+        )
+
+        patterned_seconds = [0, 90, 690, 1290, 1380, 1440]
+        noisy_marks = [
+            PlaylistMark(1, 0, seconds * 45_000)
+            for seconds in patterned_seconds
+        ] + [
+            PlaylistMark(2, 0, 0)
+            for _ in range(MAX_EPISODE_INFERENCE_BOUNDARIES)
+        ]
+        nonchapter_heavy = Playlist(
+            "00003",
+            Path("/source/00003.mpls"),
+            [PlayItem(0, "00000", "M2TS", 0, 2880 * 45_000, 1)],
+            noisy_marks,
+            0,
+        )
+        self.assertEqual(
+            partition_episode_chapters(nonchapter_heavy, 1440.0), []
+        )
+        with patch(
+            "bdmv_emby_builder.planner._item_covers_complete_clip"
+        ) as complete_clip:
+            self.assertEqual(
+                _split_episode_chapters(
+                    nonchapter_heavy,
+                    Disc(
+                        "Show/Disc", Path("/source/BDMV"), [nonchapter_heavy], []
+                    ),
+                    "ffprobe",
+                    {},
+                    0.1,
+                    1440.0,
+                ),
+                [],
+            )
+        complete_clip.assert_not_called()
+
     def test_keyboard_interrupt_preserves_completed_and_pending_audit_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4130,6 +5103,14 @@ edition = "Director's Cut"
 
             entry = state["jobs"][job["id"]]
             entry["plan_fingerprint_version"] = 2
+            (destination / ".bdmv-emby-state.json").write_text(
+                json.dumps(state), encoding="utf-8"
+            )
+            previous_version = execute_existing()
+            self.assertEqual(previous_version[0]["status"], "failed")
+            self.assertIn("legacy plan fingerprint", previous_version[0]["error"])
+
+            entry["plan_fingerprint_version"] = 3
             entry["operation"] = "copy"
             (destination / ".bdmv-emby-state.json").write_text(
                 json.dumps(state), encoding="utf-8"

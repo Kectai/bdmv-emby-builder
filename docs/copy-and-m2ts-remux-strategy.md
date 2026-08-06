@@ -7,8 +7,14 @@
 本项目采用两阶段自动策略。第一阶段判断一条 playlist 中包含几个逻辑视频：
 
 ```text
-剧集盘中多个时长相近的长 PlayItem
-    → 按 episode 拆分
+剧集盘中每个长 PlayItem 已是完整一集
+    → 按 PlayItem 拆分
+
+一集由多个完整 PlayItem 组成，并具有可靠的分组边界和时长轮廓
+    → 按连续 PlayItem 组拆分
+
+一个完整 M2TS 中包含多集
+    → 优先采用连续覆盖主标题的独立单集 playlist；其次采用可靠的重复章节结构
 
 多个完整、不同的源 M2TS，且存在非无缝边界，或 Entry Mark 得到独立 playlist/短 IG Play-All 佐证
     → 识别为 Play-All 合集，按边界拆成多个视频
@@ -20,7 +26,7 @@ connection_condition=6、局部切点、重复 clip、内容型 SubPath 或无�
     → 保持为一个逻辑视频
 ```
 
-第二阶段才决定每个逻辑视频的物化方式：完整单 M2TS 复制或硬链接；单 PlayItem 局部范围、以及仍由多个连续 PlayItem 组成的视频使用 libbluray 无损重封装。视频、音频和字幕不重新编码。
+第二阶段才决定每个逻辑视频的物化方式：完整单 M2TS 复制或硬链接；普通完整 playlist 使用 libbluray 无损重封装；经过双重验证的派生分集片段组或章节区间使用 concat stream-copy，避免从父 playlist 中途 seek。视频、音频和字幕不重新编码。
 
 输出目录是可以删除后重新生成的 Emby 派生库；原始 BDMV 始终只读。
 
@@ -55,9 +61,19 @@ BDMV 不是“一个电影文件夹”，而是一套播放结构：
 
 用户只声明 `disc_type`：`movie` 表示单部电影正片盘；`series` 表示包含一集或多集正片的剧集盘；`bonus` 表示纯特典盘。三种盘都可能包含附加内容，因此单个输出任务再使用 `main`、`episode` 或 `extras` 表示内容性质。
 
-`movie` 盘自动输出一个主正片；`series` 盘只在主 playlist 本身给出 Play-All 顺序，且各长 PlayItem 具有起点 Entry Mark、完整覆盖不同源 clip 时按 PlayItem 拆集。多个长度相近的独立 playlist 不足以证明 episode 成员关系和顺序，因此不会按 playlist 编号聚类；本盘主标题作为单集，其余进入 extras 候选并提示复核。同一标准化标题、同一季和同一 edition 下的多张盘按自然顺序连续编号，不同季或 edition 各自从 `E01` 开始。季号优先使用用户配置，其次读取 META 标题和目录中的明确 `Season N`、`Nth Season`、`第N期/季` 或 `シーズンN` 标记；没有可靠证据时默认第 1 季并给出警告，不从裸数字或 `S2` 猜测。用户可用 `episode_start` 处理非连续起始集号，规划阶段会阻止组内集号范围重叠。
+`movie` 盘自动输出一个主正片。`series` 盘按下列证据强度识别 episode：
+
+1. 主 Play-All 中每个 PlayItem 都是时长相近、完整覆盖不同源 M2TS 且具有起点 Entry Mark 的一集；
+2. 单集由多个完整且唯一的 PlayItem 组成：分组只能发生在具有 Entry Mark 的非无缝起点，同一标准化作品中其他明确分集提供稳定的中位时长轮廓；没有同行盘轮廓时，必须出现重复的短片尾到新片头重置结构；
+3. 主标题是一个完整 M2TS：优先采用多个单 PlayItem playlist，且这些范围按时间顺序无缝、无重叠地覆盖整个主标题；没有独立 playlist 旁证时，才用同行盘时长轮廓或重复且具有明显时长差异的章节节奏进行分段。
+
+这些派生分集都拒绝重复 clip、多角度、`connection_condition=6` 和内容型 SubPath，并在计划中生成警告。只有多个长度相近的独立 playlist、但不能证明它们连续覆盖主标题时，不足以证明 episode 成员关系和顺序，因此不会按 playlist 编号聚类；本盘主标题作为单集，其余进入 extras 候选并提示复核。
+
+同一标准化标题、同一季和同一 edition 下的多张盘按自然顺序连续编号，不同季或 edition 各自从 `E01` 开始。季号优先使用用户配置，其次读取 META 标题和目录中的明确 `Season N`、`Nth Season`、`第N期/季` 或 `シーズンN` 标记；没有可靠证据时默认第 1 季并给出警告，不从裸数字或 `S2` 猜测。用户可用 `episode_start` 处理非连续起始集号，规划阶段会阻止组内集号范围重叠。
 
 电影和剧集盘的其余语义唯一、非导航且不少于默认 60 秒的 playlist 都作为 `extras` 候选。花絮 Play-All 只有在完整源覆盖、唯一 clip、无多角度及无内容型 SubPath 的前提下才拆分：非无缝连接是强边界；无缝 Entry Mark 还必须得到独立单视频 playlist 或短时 IG Play-All 结构佐证。拆分结果再按实际完整 clip 去重，并优先保留独立 playlist。`bonus` 盘使用相同逻辑。60 秒阈值作用于候选 playlist，不会二次删除已可靠识别出的短分段。若电影盘还存在不少于 20 分钟、且时长达到所选主标题 35% 的其他 playlist，计划会给出歧义警告。
+
+不足 5 分钟、低置信度且完整覆盖单个 M2TS 的 extras 还会进入轻量内容复核。规划器先用 FFmpeg `volumedetect` 一次扫描全部音轨，以最响音轨为准；任一音轨存在正常语音或音乐时立即结束。只有所有音轨都不高于通用近静音阈值，或视频本身没有音轨时，才在约 20%、50%、80% 位置各解码 3 秒并使用 `freezedetect` 判断画面变化。多数窗口静止时，job 写入 `content_review.status = "needs_review"`，顶层 `recognition.extras_content_analysis` 汇总数量。该信息不参与物化策略，也不自动删除、跳过或去重内容；FFmpeg 不可用、局部范围、多 PlayItem、SubPath、多角度和长内容均安全跳过。实现不包含 OCR、作品名、盘号或 playlist ID 特例。
 
 例如，一条分段电影 playlist 可能依次使用：
 
@@ -71,7 +87,7 @@ BDMV 不是“一个电影文件夹”，而是一套播放结构：
 
 FFmpeg 的 concat demuxer 支持 `inpoint/outpoint`，但对 H.264/HEVC 等非帧内编码，官方明确提示可能输出切点前后的额外数据。蓝光还可能包含 seamless branching、解码预滚、音频帧边界和字幕状态。
 
-因此，M2TS 重封装默认使用带 libbluray 的 FFmpeg：
+因此，普通完整 playlist 的 M2TS 重封装默认使用带 libbluray 的 FFmpeg：
 
 ```bash
 ffmpeg \
@@ -85,12 +101,14 @@ ffmpeg \
 
 FFmpeg 官方说明：<https://ffmpeg.org/ffmpeg-protocols.html#bluray>
 
-`remux_backend=auto` 会优先并实际要求 `bluray` 协议。若当前 FFmpeg 不支持，构建会停止并给出明确错误，不会静默改用风险更高的方式。用户只有在明确接受通用 concat 边界限制时，才应设置：
+`remux_backend=auto` 对普通完整 playlist 会优先并实际要求 `bluray` 协议。若当前 FFmpeg 不支持，构建会停止并给出明确错误，不会静默改用风险更高的方式。用户只有在明确接受通用 concat 边界限制时，才应设置：
 
 ```toml
 [settings]
 remux_backend = "concat"
 ```
+
+派生分集是受限例外：libbluray 不能可靠地从父 playlist 中途 seek，因此 `episode_playitem_group` 和 `episode_chapter_split` 在规划器证明边界后，会由执行器重新解析 MPLS、从计划内完整独立分集重建可信时长轮廓，并使用与规划器共用的算法核对整组分区；缺段、伪造时长提示或孤立的 concat 声明都会被拒绝。验证通过后强制使用 concat stream-copy。前者的每个 PlayItem 必须完整覆盖一个不同的源 M2TS；后者的父 PlayItem 必须完整覆盖单个 M2TS，起止点必须来自 MPLS Entry Mark 章节。异常多的候选边界会安全保留为单个逻辑视频，避免无界分区计算。它们不受用户的全局 backend 偏好影响，也不能用于多角度、重复 clip、`connection_condition=6` 或内容型 SubPath。
 
 ## 4. 依赖与跨平台策略
 
@@ -158,9 +176,14 @@ META/DL 可以提供盘名，少数盘还提供 Title 目录名称，但 Title �
 
 只有证据充分时才拆分；无法可靠判断时保持 playlist 整体，避免破坏真正连续的视频。
 
-拆分后的 episode 或 Play-All 分段必须已经对应一个经 FFprobe 证明的完整独立 M2TS，因此物化时只采用复制或硬链接。不同 PlayItem 可以拥有彼此独立的时间戳域，libbluray/FFmpeg 的按秒片段 seek 对这类 playlist 并不普遍可靠；执行器会拒绝把派生分段退化成 playlist seek 重封装。内容型 SubPath 或多角度存在时，规划器保持整个 playlist，不生成这种分段任务。
+拆分后的 Play-All 花絮和单 PlayItem episode 仍必须对应一个经 FFprobe 证明的完整独立 M2TS，因此物化时只采用复制或硬链接。分集的另两种可靠结构需要重封装：
 
-无缝分支的各 clip 可能使用彼此重叠或倒退的原始时间戳域，但 MPLS 定义的逻辑播放时长仍是各 PlayItem 有效范围之和。bluray 后端先以 1 秒阈值归一化 MPEG-TS discontinuity；成品只接受 MPLS 累计时长，不把原始 libbluray 时间轴或异常空洞的镜像时长作为候选。默认容差为 2 秒，也可显式设为 0。
+- 多 PlayItem episode：各 PlayItem 都必须完整覆盖不同的源 M2TS，组起止点具有非无缝 Entry Mark 边界，并得到稳定 episode 时长轮廓或重复重置结构支持；执行时只拼接该组完整 clip；
+- 单 M2TS 多 episode：先寻找原盘独立单集 playlist，由 libbluray 读取各自完整 playlist；缺少独立旁证时，规划器只在 Entry Mark 章节可由稳定时长轮廓或重复章节节奏完整分区时生成章节区间，执行时使用 concat 的 `inpoint/outpoint`。
+
+执行器不信任序列化计划：构建前重新解析 MPLS、重新证明分段范围、源 M2TS 完整覆盖、时长和禁止结构，再允许 concat。内容型 SubPath 或多角度存在时，规划器保持整个 playlist，不生成派生分段任务。
+
+无缝分支的各 clip 可能使用彼此重叠或倒退的原始时间戳域，但 MPLS 定义的逻辑播放时长仍是各 PlayItem 有效范围之和。bluray 后端先以 0.25 秒阈值归一化 MPEG-TS discontinuity，与逐包前向间隔校验一致；成品只接受 MPLS 累计时长，不把原始 libbluray 时间轴或异常空洞的镜像时长作为候选。默认时长容差为 2 秒，也可显式设为 0。
 
 只有同时满足以下条件才直接复制：
 
@@ -182,6 +205,8 @@ META/DL 可以提供盘名，少数盘还提供 Title 目录名称，但 Title �
 - 同一个逻辑视频仍包含两个及以上 PlayItem；
 - 单 PlayItem 只使用 M2TS 的局部范围；
 - FFprobe 无法证明该 PlayItem 覆盖完整文件。
+
+后端选择与逻辑范围绑定：完整 playlist 使用 libbluray；经过验证的派生 episode 范围使用 concat。所有后端都使用 `-c copy`，不会转码。concat 切点受压缩视频随机访问点限制，因此章节派生结果仍必须通过成品时长、轨道一致性和逐包时间线校验，并在计划中保留中等置信度警告供人工播放复核。
 
 输出结构保持 Emby 电影命名：
 

@@ -10,7 +10,8 @@ BDMV → Emby Builder 只读分析 Blu-ray BDMV，识别电影、剧集和附加
 
 - 递归发现单张或多张 BDMV，读取 META、MPLS、PlayItem、Entry Mark、in/out、章节、连接条件、多角度、STC 和 SubPath；
 - 离线识别电影主标题、剧集 episode 和附加内容，不查询网络元数据；
-- 拆分剧集型 Play-All 和边界可靠的花絮 Play-All，排除重复 playlist、菜单循环及高密度超短交互导航；
+- 拆分剧集型 Play-All：支持一集对应一个 PlayItem、一集由多个完整 PlayItem 组成，以及一个 M2TS 由独立子 playlist 或重复章节结构划分为多集；
+- 拆分边界可靠的花絮 Play-All，排除重复 playlist、菜单循环及高密度超短交互导航；
 - 支持 `copy_remux`、`hardlink_remux` 和 `hardlink_only` 三种目录级策略；
 - 默认输出 M2TS，视频、音频和 PGS 字幕均使用 stream copy，不重新编码；
 - 生成可审核的扫描、计划、dry-run、构建结果和状态文件；
@@ -27,13 +28,16 @@ BDMV → Emby Builder 只读分析 Blu-ray BDMV，识别电影、剧集和附加
 按 disc_type 识别 movie / series / bonus
     ↓
 判断 playlist 中有几个逻辑视频
-    ├─ 剧集 Play-All                         → 按 episode 拆分
+    ├─ 一集对应一个完整 PlayItem              → 按 PlayItem 拆分
+    ├─ 一集由多个完整 PlayItem 组成            → 按可靠边界分组
+    ├─ 一个 M2TS 包含多集                     → 优先独立子 playlist，其次重复章节
     ├─ 完整独立 M2TS 且具有可靠边界的 Play-All → 按视频拆分
     ├─ 菜单、图库和交互导航                    → 排除
     └─ 连续分段、局部切点或证据不足             → 保持整体
     ↓
-完整单 M2TS → copy / hardlink
-多段或局部范围 → libbluray stream-copy remux
+完整单 M2TS                     → copy / hardlink
+完整 playlist                   → libbluray stream-copy remux
+已验证的派生分集片段组或章节区间 → concat stream-copy remux
 ```
 
 逻辑边界综合使用源文件完整覆盖、clip 唯一性、Entry Mark、连接条件、多角度、SubPath、时长分布及其他 playlist 的旁证。`connection_condition=6`、重复 clip、多角度、内容型 SubPath 或不可靠边界不会被拆分。
@@ -170,11 +174,15 @@ bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 
 季号按“用户配置 > META 明确季标 > 目录明确季标 > 默认第 1 季”确定。自动识别只接受 `Season 2`、`2nd Season`、`第2期`、`第2季`、`シーズン2` 等明确形式；缺少证据时会警告。相同作品、相同季和相同 edition 的多张盘跨盘连续编号；不同季或 edition 各自从 `E01` 开始，组内集号范围重叠会在规划阶段失败。
 
-剧集自动拆分要求主 playlist 自身给出 Play-All 顺序，并且每个 episode 边界可由完整 clip 与 Entry Mark 证明。只有多个长度相近的独立 playlist 时，不会再按 playlist 编号猜测集数或顺序：本盘主标题作为单集，其余作为 extras 候选，等待用户在派生目录中确认。
+剧集自动拆分优先使用原盘明确的播放关系。若一个 episode 对应一个完整 PlayItem，则直接拆分；若一个 episode 横跨多个完整 PlayItem，则只在非无缝 Entry Mark 边界成立，并且同作品中其他明确分集提供了稳定时长轮廓，或本盘存在重复的片尾到片头重置结构时才分组。一条完整 M2TS 也可能收录两集或多集：程序先寻找能连续覆盖主标题的独立单集 playlist；没有这种旁证时，才在时长轮廓或重复章节节奏足够明确时按 Entry Mark 章节切分。以上推断都会生成警告并要求审核。
+
+仅有多个时长相近的独立 playlist、但无法证明它们按顺序连续覆盖主标题时，不会按 playlist 编号猜测集数或顺序：本盘主标题作为单集，其余作为 extras 候选，等待用户在派生目录中确认。多角度、`connection_condition=6`、重复 clip 或内容型 SubPath 会阻止派生分集。
 
 ### 附加内容
 
 `disc_type` 只描述盘的主要用途，不把内容强制限定为正片、剧集或花絮。`movie` 和 `series` 盘会先确定正片或 episode，再从同一张盘剩余的有效 playlist 中选择附加内容；候选必须与已选内容在语义上不同、不是导航或菜单循环、引用的源 M2TS 均存在，并达到 `extra_min_seconds`（默认 60 秒）。`bonus` 盘不选择正片，而是对全部有效 playlist 使用相同的附加内容筛选和去重规则。由于 BDMV 通常不提供可靠的自然语言花絮名称，extras 仍属于需要人工复核的保守分类；程序不会继续猜测它属于预告、访谈、删减片段或幕后花絮。
+
+规划器会对不足 5 分钟、低置信度且完整覆盖单个 M2TS 的 extras 做轻量内容检查：先用 FFmpeg 扫描全部音轨，以最响音轨为准；只有所有音轨都接近静音或没有音轨时，才抽样检查三个短视频窗口。近乎静音且多数抽样画面静止的任务会增加 `content_review.status = "needs_review"`、证据和顶层警告；它仍保留在计划中，不会自动排除。正常带音乐的 OP/ED 和有语音的广播剧在音频阶段即结束，不做视频抽样。该检查不使用 OCR、不增加 Python 依赖；FFmpeg 不可用或候选不是完整单 M2TS 时安全跳过。
 
 附加内容默认写入作品目录下的 `[settings].extras_folder`（默认 `extras`），而不是写入剧集的 `Season XX` 目录。文件名使用以下稳定格式：
 
@@ -211,7 +219,7 @@ Emby 官方支持以下附加内容子目录名：
 `processing` 配置在 `[[disc]]` 中，对这张盘生成的正片、episode 和 extras 一并生效。程序会先判断每个输出属于哪种情况：
 
 - **完整单 M2TS**：playlist 只使用一个源 M2TS，并完整覆盖其有效时间范围，不需要拼接或裁切；
-- **需要重封装**：playlist 使用多个 M2TS、只取某个 M2TS 的局部范围，或包含需要按 playlist 处理的多角度、内容型 SubPath 等结构。
+- **需要重封装**：playlist 使用多个 M2TS、只取某个 M2TS 的局部范围，或包含需要按 playlist 处理的多角度、内容型 SubPath 等结构。普通完整标题由 libbluray 读取；经过规划器和执行器双重验证的分集片段组或章节区间使用 concat stream-copy，避免对父 playlist 做不可靠的中途 seek。
 
 这里的“重封装”是把原有视频、音频和字幕流无损写入新容器，不重新编码画面或声音。它主要消耗磁盘读写，CPU 占用通常远低于转码。
 
@@ -255,14 +263,15 @@ Emby 官方支持以下附加内容子目录名：
 | `ffmpeg` | `"ffmpeg"` | FFmpeg 命令或路径 |
 | `ffprobe` | `"ffprobe"` | FFprobe 命令或路径 |
 
-`auto` 实际要求 FFmpeg 支持 `bluray` protocol；不会静默降级为 concat。`concat` 对蓝光精确切点和 seamless branching 有固有限制，只应在明确接受风险时使用。
+`auto` 对普通 playlist 重封装实际要求 FFmpeg 支持 `bluray` protocol，不会静默把完整标题降级为 concat。只有规划器生成且执行器重新验证的 `episode_playitem_group` / `episode_chapter_split` 会强制使用 concat；前者只组合完整源 M2TS，后者只采用 MPLS Entry Mark 章节边界，并仍需通过成品时长、轨道和逐包时间线校验。用户显式设置全局 `concat` 对其他蓝光精确切点和 seamless branching 仍有固有限制，只应在明确接受风险时使用。
 
 ## 计划审核与输出
 
 执行前至少检查：
 
-- 顶层 `warnings` 和 `recognition.main_selection_counts`；
+- 顶层 `warnings`、`recognition.main_selection_counts` 和 `recognition.extras_content_analysis`；
 - 正片、episode、extras 数量及 `playlist_selection`；
+- extras 的 `content_review`；它只表示需要人工确认，不改变 hardlink/copy/remux 操作；
 - `playlist_segment`、源 M2TS、in/out 和目标路径；
 - dry-run 的最终 `operation` 与预计空间；
 - 多版本归属、剧集季号及跨盘集号。
@@ -323,15 +332,16 @@ TOML、scan、plan、results 和 state 通常包含绝对路径、目录名和�
 python3 -m unittest discover -s tests -v
 ```
 
-当前 127 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、Play-All/剧集拆分、季号/集号/edition、跨平台路径、BDMV 结构与链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
+当前 148 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、发行目录标题清洗、跨平台路径、BDMV 结构与链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
 
-真实数据验证覆盖多张 BDMV、电影主盘、纯特典盘、多盘剧集、1080p/4K、多段 seamless branching 正片及直接复制/硬链接/重封装。记录见[验证报告](examples/VALIDATION.md)。
+真实数据验证覆盖多张 BDMV、电影主盘、纯特典盘、多盘剧集、一集一个 M2TS、一集跨多个 M2TS、1080p/4K、多段 seamless branching 正片及直接复制/硬链接/重封装。记录见[验证报告](examples/VALIDATION.md)。
 
 Beta 阶段已知边界：
 
 - 自动主标题选择仍需人工审核长候选歧义；
 - 同盘多部长片、多剪辑版和复杂多角度/内容型 SubPath 可能需要人工处理；
 - 花絮语义名称通常不能从 BDMV 可靠获得；
+- 轻量 extras 内容检查只提供复核证据，不使用 OCR，也不会自动删除疑似版权警告或其他系统内容；
 - M2TS 对章节和丰富轨道元数据的表达能力有限，章节主要保存在计划和状态中；
 - 重新规划导致 job ID 或输出路由变化时，旧状态和旧派生文件不会自动清退；
 - 自动 CI 覆盖 macOS/Linux/Windows 的纯代码与小文件回归；真实原盘和 libbluray 构建目前仍主要在 macOS 上验证。

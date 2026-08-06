@@ -14,16 +14,31 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
+from statistics import median
 from typing import Any
 
+from .episode import (
+    chapter_pattern_groups as _shared_chapter_pattern_groups,
+    partition_episode_chapters,
+    partition_episode_playitems,
+)
 from .limits import (
     EPISODE_DURATION_RATIO,
     EPISODE_MAX_SECONDS,
     EPISODE_MIN_SECONDS,
+    EXTRA_CONTENT_ANALYSIS_MAX_SECONDS,
+    EXTRA_FREEZE_MIN_SECONDS,
+    EXTRA_FREEZE_NOISE_DB,
+    EXTRA_NEAR_SILENCE_MAX_DB,
+    EXTRA_STATIC_MIN_SAMPLES,
+    EXTRA_STATIC_SAMPLE_RATIOS,
+    EXTRA_STATIC_SAMPLE_SECONDS,
     IGNORABLE_EXTRA_SUBPATH_TYPES,
     MAX_COPY_BOUNDARY_TOLERANCE_SECONDS,
     MAX_DURATION_TOLERANCE_SECONDS,
+    MAX_EPISODE_INFERENCE_BOUNDARIES,
     PLAY_ALL_MAX_ITEM_SECONDS,
+    SEPARATE_EPISODE_DURATION_RATIO,
 )
 from .mpls import PlayItem, Playlist, PlaylistMark, clock, is_menu_loop
 from .path_safety import (
@@ -53,7 +68,6 @@ METADATA_LANGUAGE_PRIORITY = ("jpn", "eng")
 SINGLE_DISC_RULE = "<single-disc>"
 PLAUSIBLE_MAIN_MIN_SECONDS = 20 * 60
 PLAUSIBLE_MAIN_MIN_RATIO = 0.35
-SEPARATE_EPISODE_DURATION_RATIO = 1.15
 COLLECTION_CONSENSUS_MIN_PEERS = 3
 COLLECTION_CONSENSUS_MIN_RATIO = 0.8
 DEFAULT_SEASON_NUMBER = 1
@@ -71,6 +85,17 @@ VOLUME_SUFFIX_PATTERN = re.compile(
     r"[\s　]*(?:上巻|中巻|下巻|前巻|後巻|第?\s*\d+\s*巻|"
     r"(?:vol(?:ume)?|disc|disk)\s*[._ -]*\d+)\s*$",
     flags=re.IGNORECASE,
+)
+LEADING_RELEASE_TAG_PATTERN = re.compile(
+    r"^\[(?P<tag>[^\[\]\r\n]+)\][\s._-]*"
+)
+TECHNICAL_RELEASE_TAG_PATTERN = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(?:1080p|2160p|uhd|blu-?ray|bdmv|avc|hevc|lpcm)"
+    r"(?:$|[^a-z0-9])"
+)
+RELEASE_DATE_TAG_PATTERN = re.compile(r"(?:19|20)?\d{6}")
+TECHNICAL_TITLE_SUFFIX_PATTERN = re.compile(
+    r"(?i)[\s._-]+(?:1080p|2160p|uhd|blu-?ray|bdmv|avc|hevc|lpcm)\b.*$"
 )
 EXTRA_FOLDERS = {
     "extras",
@@ -533,7 +558,19 @@ def _safe_filename(stem: str, suffix: str) -> str:
 
 def _fallback_movie_name(disc_key: str) -> str:
     first = Path(disc_key).parts[0] if Path(disc_key).parts else disc_key
-    name = re.sub(r"(?i)\b(?:1080p|2160p|blu-?ray|bdmv|avc|hevc|lpcm)\b.*$", "", first)
+    name = first
+    while match := LEADING_RELEASE_TAG_PATTERN.match(name):
+        tag = match.group("tag").strip()
+        if not (
+            TECHNICAL_RELEASE_TAG_PATTERN.search(tag)
+            or RELEASE_DATE_TAG_PATTERN.fullmatch(tag)
+        ):
+            break
+        remainder = name[match.end() :]
+        if not remainder:
+            break
+        name = remainder
+    name = TECHNICAL_TITLE_SUFFIX_PATTERN.sub("", name)
     return _safe_component(name.replace(".", " ").strip(" -_"))
 
 
@@ -634,16 +671,18 @@ def _infer_series_season(
     return selected[0], selected[1], conflicts
 
 
-def _split_episode_playitems(
+def _split_independent_episode_playitems(
     playlist: Playlist,
     disc: Disc,
     ffprobe: str,
     cache: dict[Path, tuple[float, float] | None],
     tolerance_seconds: float,
 ) -> list[tuple[Playlist, float]]:
-    """Split a simple omnibus playlist into independently copyable episodes."""
+    """Split an omnibus whose complete PlayItems are already whole episodes."""
     if (
         len(playlist.items) < 2
+        or len(playlist.items) > MAX_EPISODE_INFERENCE_BOUNDARIES
+        or len(playlist.marks) > MAX_EPISODE_INFERENCE_BOUNDARIES
         or _has_content_subpaths(playlist)
         or any(item.is_multi_angle for item in playlist.items)
         or any(item.connection_condition == 6 for item in playlist.items[1:])
@@ -696,6 +735,176 @@ def _split_episode_playitems(
         )
         result.append((episode, accumulated_ticks / 45_000))
         accumulated_ticks += item.duration_ticks
+    return result
+
+
+def _playlist_item_slice(
+    playlist: Playlist, start: int, end: int, segment_id: str
+) -> Playlist:
+    """Return an auditable synthetic playlist for a contiguous PlayItem range."""
+    index_map = {
+        item.index: local_index
+        for local_index, item in enumerate(playlist.items[start:end])
+    }
+    items = [
+        PlayItem(
+            index_map[item.index],
+            item.clip_id,
+            item.codec,
+            item.in_ticks,
+            item.out_ticks,
+            item.connection_condition,
+            item.is_multi_angle,
+            item.stc_id,
+        )
+        for item in playlist.items[start:end]
+    ]
+    marks = [
+        PlaylistMark(mark.mark_type, index_map[mark.play_item_ref], mark.mark_ticks)
+        for mark in playlist.marks
+        if mark.play_item_ref in index_map
+    ]
+    return Playlist(
+        segment_id,
+        playlist.path,
+        items,
+        marks,
+        playlist.subpath_count,
+        playlist.subpath_types,
+    )
+
+
+def _partition_episode_playitems(
+    playlist: Playlist,
+    duration_hint_seconds: float | None,
+    tolerance_seconds: float,
+) -> list[tuple[int, int]]:
+    """Find conservative episode groups at authored non-seamless Entry Marks."""
+    return partition_episode_playitems(
+        playlist, duration_hint_seconds, tolerance_seconds
+    )
+
+
+def _split_episode_playitems(
+    playlist: Playlist,
+    disc: Disc,
+    ffprobe: str,
+    cache: dict[Path, tuple[float, float] | None],
+    tolerance_seconds: float,
+    duration_hint_seconds: float | None = None,
+) -> list[tuple[Playlist, float]]:
+    """Split whole-episode PlayItems or conservative groups of complete clips."""
+    if (
+        len(playlist.items) > MAX_EPISODE_INFERENCE_BOUNDARIES
+        or len(playlist.marks) > MAX_EPISODE_INFERENCE_BOUNDARIES
+    ):
+        return []
+    independent = _split_independent_episode_playitems(
+        playlist, disc, ffprobe, cache, tolerance_seconds
+    )
+    if independent:
+        return independent
+    if (
+        len(playlist.items) < 3
+        or _has_content_subpaths(playlist)
+        or any(item.is_multi_angle for item in playlist.items)
+        or any(item.connection_condition == 6 for item in playlist.items[1:])
+        or len({item.clip_id for item in playlist.items}) != len(playlist.items)
+        or not all(
+            _item_covers_complete_clip(
+                disc, item, ffprobe, cache, tolerance_seconds
+            )
+            for item in playlist.items
+        )
+    ):
+        return []
+    groups = _partition_episode_playitems(
+        playlist, duration_hint_seconds, tolerance_seconds
+    )
+    if not groups:
+        return []
+    offsets = [0]
+    for item in playlist.items:
+        offsets.append(offsets[-1] + item.duration_ticks)
+    return [
+        (
+            _playlist_item_slice(
+                playlist,
+                start,
+                end,
+                f"{playlist.playlist_id}-P{start + 1:02d}-{end:02d}",
+            ),
+            offsets[start] / 45_000,
+        )
+        for start, end in groups
+    ]
+
+
+def _chapter_pattern_groups(playlist: Playlist) -> list[tuple[int, int]]:
+    """Infer repeated episode chapter blocks only when their cadence is distinct."""
+    return _shared_chapter_pattern_groups(playlist)
+
+
+def _split_episode_chapters(
+    playlist: Playlist,
+    disc: Disc,
+    ffprobe: str,
+    cache: dict[Path, tuple[float, float] | None],
+    tolerance_seconds: float,
+    duration_hint_seconds: float | None = None,
+) -> list[tuple[Playlist, float]]:
+    """Split several episodes stored in one complete M2TS at authored chapters."""
+    if (
+        len(playlist.items) != 1
+        or len(playlist.marks) > MAX_EPISODE_INFERENCE_BOUNDARIES
+        or _has_content_subpaths(playlist)
+        or playlist.items[0].is_multi_angle
+        or not _item_covers_complete_clip(
+            disc, playlist.items[0], ffprobe, cache, tolerance_seconds
+        )
+    ):
+        return []
+    groups = partition_episode_chapters(playlist, duration_hint_seconds)
+    if not groups:
+        return []
+    chapter_starts = playlist.chapter_ticks
+    boundaries = [*chapter_starts, playlist.duration_ticks]
+
+    parent = playlist.items[0]
+    result: list[tuple[Playlist, float]] = []
+    for start, end in groups:
+        start_ticks = boundaries[start]
+        end_ticks = boundaries[end]
+        item = PlayItem(
+            0,
+            parent.clip_id,
+            parent.codec,
+            parent.in_ticks + start_ticks,
+            parent.in_ticks + end_ticks,
+            parent.connection_condition,
+            parent.is_multi_angle,
+            parent.stc_id,
+        )
+        marks = [
+            PlaylistMark(mark.mark_type, 0, mark.mark_ticks)
+            for mark in playlist.marks
+            if mark.mark_type == 1
+            and item.in_ticks <= mark.mark_ticks < item.out_ticks
+        ]
+        segment_id = f"{playlist.playlist_id}-C{start + 1:02d}-{end + 1:02d}"
+        result.append(
+            (
+                Playlist(
+                    segment_id,
+                    playlist.path,
+                    [item],
+                    marks,
+                    playlist.subpath_count,
+                    playlist.subpath_types,
+                ),
+                start_ticks / 45_000,
+            )
+        )
     return result
 
 
@@ -899,6 +1108,57 @@ def _separate_episode_playlists(
 ) -> list[tuple[Playlist, float]]:
     """Resolve standalone episode playlists only through an authored Play-All order."""
     if (
+        len(main.items) == 1
+        and not _has_content_subpaths(main)
+        and not main.items[0].is_multi_angle
+    ):
+        parent = main.items[0]
+        unique_ranges: dict[tuple[str, int, int], Playlist] = {}
+        for playlist in sorted(candidates, key=lambda value: value.playlist_id):
+            if (
+                playlist.playlist_id == main.playlist_id
+                or len(playlist.items) != 1
+                or _has_content_subpaths(playlist)
+                or playlist.items[0].is_multi_angle
+                or playlist.items[0].clip_id != parent.clip_id
+                or playlist.items[0].in_ticks < parent.in_ticks
+                or playlist.items[0].out_ticks > parent.out_ticks
+                or not EPISODE_MIN_SECONDS
+                <= playlist.duration_seconds
+                <= EPISODE_MAX_SECONDS
+            ):
+                continue
+            item = playlist.items[0]
+            unique_ranges.setdefault(
+                (item.clip_id, item.in_ticks, item.out_ticks), playlist
+            )
+        authored_parts = sorted(
+            unique_ranges.values(),
+            key=lambda value: (
+                value.items[0].in_ticks,
+                value.items[0].out_ticks,
+                value.playlist_id,
+            ),
+        )
+        tolerance_ticks = round(tolerance_seconds * 45_000)
+        if (
+            len(authored_parts) >= 2
+            and abs(authored_parts[0].items[0].in_ticks - parent.in_ticks)
+            <= tolerance_ticks
+            and abs(authored_parts[-1].items[0].out_ticks - parent.out_ticks)
+            <= tolerance_ticks
+            and all(
+                abs(left.items[0].out_ticks - right.items[0].in_ticks)
+                <= tolerance_ticks
+                for left, right in zip(authored_parts, authored_parts[1:])
+            )
+        ):
+            durations = [part.duration_seconds for part in authored_parts]
+            if max(durations) / min(durations) <= SEPARATE_EPISODE_DURATION_RATIO:
+                return [(playlist, 0.0) for playlist in authored_parts]
+        return []
+
+    if (
         len(main.items) < 2
         or _has_content_subpaths(main)
         or any(item.is_multi_angle for item in main.items)
@@ -970,6 +1230,302 @@ def _resolve_ffprobe(settings: dict[str, Any]) -> str:
         f"ffprobe is unavailable: {value!r}; set settings.ffprobe or "
         "BDMV_EMBY_FFPROBE"
     )
+
+
+def _resolve_optional_ffmpeg(settings: dict[str, Any]) -> str | None:
+    """Resolve FFmpeg for review hints without making planning depend on it."""
+    value = os.environ.get("BDMV_EMBY_FFMPEG") or str(
+        settings.get("ffmpeg", "ffmpeg")
+    )
+    found = shutil.which(value)
+    if found:
+        return found
+    candidate = Path(value).expanduser()
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return None
+
+
+_VOLUME_DETECT_PATTERN = re.compile(
+    r"(?P<name>mean_volume|max_volume):\s*"
+    r"(?P<value>-?inf|-?\d+(?:\.\d+)?)\s*dB",
+    flags=re.IGNORECASE,
+)
+
+
+def _parse_volume_detect(
+    stderr: str,
+) -> dict[str, float | int | None] | None:
+    values: dict[str, list[float | None]] = {
+        "mean_volume": [],
+        "max_volume": [],
+    }
+    for match in _VOLUME_DETECT_PATTERN.finditer(stderr):
+        raw_value = match.group("value").casefold()
+        values[match.group("name").casefold()].append(
+            None if raw_value == "-inf" else float(raw_value)
+        )
+    if not values["mean_volume"] or len(values["mean_volume"]) != len(
+        values["max_volume"]
+    ):
+        return None
+
+    def loudest(samples: list[float | None]) -> float | None:
+        finite = [value for value in samples if value is not None]
+        return max(finite) if finite else None
+
+    return {
+        "audio_stream_count": len(values["max_volume"]),
+        "mean_volume_db": loudest(values["mean_volume"]),
+        "max_volume_db": loudest(values["max_volume"]),
+    }
+
+
+def _probe_extra_audio_volume(
+    source: Path, ffmpeg: str
+) -> dict[str, float | int | None] | None:
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "info",
+                "-i",
+                str(source),
+                "-map",
+                "0:a?",
+                "-map",
+                "0:v:0?",
+                "-c:v",
+                "copy",
+                "-sn",
+                "-dn",
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    parsed = _parse_volume_detect(result.stderr)
+    if parsed is not None:
+        return parsed
+    # The optional copied video stream keeps a valid video-only input from
+    # failing with "no output streams". No volumedetect result therefore means
+    # that the source has no audio, rather than that audio decoding failed.
+    return {
+        "audio_stream_count": 0,
+        "mean_volume_db": None,
+        "max_volume_db": None,
+    }
+
+
+def _probe_extra_static_samples(
+    source: Path, duration_seconds: float, ffmpeg: str
+) -> dict[str, Any] | None:
+    static_samples = 0
+    sample_starts: list[float] = []
+    sample_duration = min(EXTRA_STATIC_SAMPLE_SECONDS, duration_seconds)
+    for ratio in EXTRA_STATIC_SAMPLE_RATIOS:
+        start = min(
+            max(duration_seconds * ratio - sample_duration / 2, 0.0),
+            max(duration_seconds - sample_duration, 0.0),
+        )
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-nostdin",
+                    "-loglevel",
+                    "info",
+                    "-ss",
+                    f"{start:.6f}",
+                    "-t",
+                    f"{sample_duration:.6f}",
+                    "-i",
+                    str(source),
+                    "-map",
+                    "0:v:0",
+                    "-vf",
+                    (
+                        "freezedetect="
+                        f"n={EXTRA_FREEZE_NOISE_DB:g}dB:"
+                        f"d={EXTRA_FREEZE_MIN_SECONDS:g}"
+                    ),
+                    "-an",
+                    "-sn",
+                    "-dn",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        sample_starts.append(round(start, 3))
+        if "lavfi.freezedetect.freeze_start" in result.stderr:
+            static_samples += 1
+    return {
+        "sample_count": len(EXTRA_STATIC_SAMPLE_RATIOS),
+        "static_sample_count": static_samples,
+        "sample_duration_seconds": sample_duration,
+        "sample_starts_seconds": sample_starts,
+    }
+
+
+def _extra_job_covers_complete_source(
+    job: dict[str, Any],
+    ffprobe: str,
+    clip_bounds_cache: dict[Path, tuple[float, float] | None],
+    tolerance_seconds: float,
+) -> bool:
+    if (
+        job.get("kind") != "extras"
+        or job.get("confidence") != "low"
+        or not 0 < float(job.get("duration_seconds") or 0)
+        <= EXTRA_CONTENT_ANALYSIS_MAX_SECONDS
+        or job.get("missing_sources")
+        or job.get("subpath_count")
+        or len(job.get("items", [])) != 1
+    ):
+        return False
+    item = job["items"][0]
+    if item.get("is_multi_angle"):
+        return False
+    source = Path(str(item.get("source", "")))
+    bounds = _probe_clip_bounds(source, ffprobe, clip_bounds_cache)
+    if bounds is None:
+        return False
+    start, end = bounds
+    return (
+        abs(float(item["in_seconds"]) - start) <= tolerance_seconds
+        and abs(float(item["out_seconds"]) - end) <= tolerance_seconds
+    )
+
+
+def _analyze_extra_for_review(
+    job: dict[str, Any], ffmpeg: str
+) -> tuple[str, dict[str, Any] | None]:
+    """Return review evidence without ever authorizing content exclusion."""
+    source = Path(job["items"][0]["source"])
+    audio = _probe_extra_audio_volume(source, ffmpeg)
+    if audio is None:
+        return "unavailable", None
+    max_volume = audio["max_volume_db"]
+    near_silent = (
+        max_volume is None or max_volume <= EXTRA_NEAR_SILENCE_MAX_DB
+    )
+    if not near_silent:
+        return "clear", None
+    video = _probe_extra_static_samples(
+        source, float(job["duration_seconds"]), ffmpeg
+    )
+    if video is None:
+        return (
+            "review",
+            {
+                "status": "needs_review",
+                "suspected_category": "system_content",
+                "reason": "near_silent_video_analysis_unavailable",
+                "automatic_exclusion": False,
+                "audio": {**audio, "near_silent": True},
+                "video": {"status": "unavailable"},
+            },
+        )
+    if video["static_sample_count"] < EXTRA_STATIC_MIN_SAMPLES:
+        return "clear", None
+    return (
+        "review",
+        {
+            "status": "needs_review",
+            "suspected_category": "system_content",
+            "reason": "near_silent_and_mostly_static",
+            "automatic_exclusion": False,
+            "audio": {**audio, "near_silent": True},
+            "video": {**video, "mostly_static": True},
+        },
+    )
+
+
+def _apply_extra_content_analysis(
+    jobs: list[dict[str, Any]],
+    settings: dict[str, Any],
+    ffprobe: str,
+    clip_bounds_cache: dict[Path, tuple[float, float] | None],
+    warnings: list[str],
+) -> dict[str, int | bool]:
+    tolerance_seconds = float(settings["copy_boundary_tolerance_seconds"])
+    eligible = [
+        job
+        for job in jobs
+        if _extra_job_covers_complete_source(
+            job,
+            ffprobe,
+            clip_bounds_cache,
+            tolerance_seconds,
+        )
+    ]
+    summary: dict[str, int | bool] = {
+        "enabled": True,
+        "eligible_count": len(eligible),
+        "analyzed_count": 0,
+        "needs_review_count": 0,
+        "unavailable_count": 0,
+    }
+    if not eligible:
+        return summary
+    ffmpeg = _resolve_optional_ffmpeg(settings)
+    if ffmpeg is None:
+        summary["enabled"] = False
+        summary["unavailable_count"] = len(eligible)
+        warnings.append(
+            "lightweight extras content analysis was skipped because FFmpeg "
+            "is unavailable; no media was excluded"
+        )
+        return summary
+    for job in eligible:
+        status, evidence = _analyze_extra_for_review(job, ffmpeg)
+        if status == "unavailable":
+            summary["unavailable_count"] += 1
+            continue
+        summary["analyzed_count"] += 1
+        if status != "review" or evidence is None:
+            continue
+        summary["needs_review_count"] += 1
+        job["content_review"] = evidence
+        playlist_label = job.get("playlist_segment") or job["playlist"]
+        warnings.append(
+            f"{job['disc']}: extras playlist {playlist_label} is near-silent "
+            "and may be static system content; review before building "
+            "(it was not automatically excluded)"
+        )
+    if summary["unavailable_count"]:
+        warnings.append(
+            f"lightweight extras content analysis could not inspect "
+            f"{summary['unavailable_count']} eligible item(s); no media was excluded"
+        )
+    return summary
 
 
 def _bluray_url(disc: Disc) -> str:
@@ -1313,6 +1869,7 @@ def _job(
     season_source: str | None = None,
     episode_number: int | None = None,
     episode_number_source: str | None = None,
+    episode_duration_hint_seconds: float | None = None,
 ) -> dict[str, Any]:
     movie_dir = _safe_component(library_dir)
     container = settings["container"].lstrip(".")
@@ -1355,7 +1912,11 @@ def _job(
             / folder
             / _safe_filename(stem, f".{container}")
         )
-        confidence = "medium" if playlist.duration_seconds >= 300 else "low"
+        confidence = (
+            "medium"
+            if playlist.duration_seconds >= EXTRA_CONTENT_ANALYSIS_MAX_SECONDS
+            else "low"
+        )
 
     items = []
     missing = []
@@ -1392,6 +1953,15 @@ def _job(
         )
     else:
         operation = "remux_mkv"
+    required_remux_backend = (
+        "concat"
+        if selection_method in {"episode_playitem_group", "episode_chapter_split"}
+        and (
+            selection_method == "episode_chapter_split"
+            or len(items) > 1
+        )
+        else None
+    )
     return {
         "id": hashlib.sha256(stable.encode()).hexdigest()[:16],
         "disc": disc.key,
@@ -1413,6 +1983,7 @@ def _job(
         "season_source": season_source,
         "episode_number": episode_number,
         "episode_number_source": episode_number_source,
+        "episode_duration_hint_seconds": episode_duration_hint_seconds,
         "confidence": confidence,
         "version": version,
         "version_source": version_source,
@@ -1425,6 +1996,7 @@ def _job(
         "subpath_types": list(playlist.subpath_types),
         "chapter_ticks": playlist.chapter_ticks,
         "operation": operation,
+        "required_remux_backend": required_remux_backend,
         "duration_tolerance_seconds": float(settings["duration_tolerance_seconds"]),
         "items": items,
         "missing_sources": missing,
@@ -1524,6 +2096,55 @@ def make_plan(
     assigned_episodes: dict[tuple[str, int, str], set[int]] = {}
     default_season_warned: set[str] = set()
     clip_bounds_cache: dict[Path, tuple[float, float] | None] = {}
+    profile_durations: dict[tuple[str, str], list[float]] = {}
+    for profile_disc in discs:
+        profile_rule = rules.get(profile_disc.key, {})
+        if (
+            _effective_disc_type(profile_rule, default_disc_type) != "series"
+            or profile_rule.get("playlist_rules")
+        ):
+            continue
+        profile_choice = main_choices.get(profile_disc.key)
+        profile_main = next(
+            (
+                playlist
+                for playlist in _usable_candidates(profile_disc)
+                if profile_choice
+                and playlist.playlist_id == str(profile_choice["playlist"])
+            ),
+            None,
+        )
+        if profile_main is None:
+            continue
+        profile_title = _series_title(profile_disc)[0]
+        profile_library = profile_rule.get(
+            "library_dir", default_title or profile_title
+        )
+        profile_key = (
+            unicodedata.normalize(
+                "NFC", _safe_component(str(profile_library))
+            ).casefold(),
+            unicodedata.normalize(
+                "NFC", str(profile_rule.get("edition") or "")
+            ).casefold(),
+        )
+        strong_parts = _split_independent_episode_playitems(
+            profile_main,
+            profile_disc,
+            ffprobe,
+            clip_bounds_cache,
+            float(settings["copy_boundary_tolerance_seconds"]),
+        )
+        if len(strong_parts) >= 2:
+            profile_durations.setdefault(profile_key, []).extend(
+                part.duration_seconds for part, _ in strong_parts
+            )
+    episode_duration_hints = {
+        key: float(median(values))
+        for key, values in profile_durations.items()
+        if len(values) >= 2
+        and max(values) / min(values) <= SEPARATE_EPISODE_DURATION_RATIO
+    }
 
     for disc in discs:
         rule = rules.get(disc.key, {})
@@ -1723,6 +2344,14 @@ def make_plan(
                 normalized_library = unicodedata.normalize(
                     "NFC", _safe_component(str(library_dir))
                 ).casefold()
+                episode_duration_hint = episode_duration_hints.get(
+                    (
+                        normalized_library,
+                        unicodedata.normalize(
+                            "NFC", str(main_edition or "")
+                        ).casefold(),
+                    )
+                )
                 if (
                     season_source == "default_first_season"
                     and normalized_library not in default_season_warned
@@ -1740,8 +2369,20 @@ def make_plan(
                     ffprobe,
                     clip_bounds_cache,
                     float(settings["copy_boundary_tolerance_seconds"]),
+                    episode_duration_hint,
                 )
-                episode_selection = "episode_playitem_split"
+                episode_selection = (
+                    "episode_playitem_group"
+                    if episode_parts
+                    and any(len(part.items) > 1 for part, _ in episode_parts)
+                    else "episode_playitem_split"
+                )
+                if episode_selection == "episode_playitem_group":
+                    warnings.append(
+                        f"{disc.key}: inferred {len(episode_parts)} episodes from "
+                        f"contiguous complete-clip groups in playlist "
+                        f"{main.playlist_id}; review boundaries before building"
+                    )
                 if not episode_parts:
                     episode_parts = _separate_episode_playlists(
                         candidates,
@@ -1759,6 +2400,22 @@ def make_plan(
                                 playlist.playlist_id for playlist, _ in episode_parts
                             )
                             + "; review episode membership before building"
+                        )
+                if not episode_parts:
+                    episode_parts = _split_episode_chapters(
+                        main,
+                        disc,
+                        ffprobe,
+                        clip_bounds_cache,
+                        float(settings["copy_boundary_tolerance_seconds"]),
+                        episode_duration_hint,
+                    )
+                    episode_selection = "episode_chapter_split"
+                    if episode_parts:
+                        warnings.append(
+                            f"{disc.key}: inferred {len(episode_parts)} episodes from "
+                            f"repeated chapter boundaries inside playlist "
+                            f"{main.playlist_id}; review boundaries before building"
                         )
                 if not episode_parts:
                     episode_parts = [(main, 0.0)]
@@ -1831,7 +2488,12 @@ def make_plan(
                             disc_title_source=disc_title_source,
                             source_playlist=(
                                 main.playlist_id
-                                if episode_selection == "episode_playitem_split"
+                                if episode_selection
+                                in {
+                                    "episode_playitem_split",
+                                    "episode_playitem_group",
+                                    "episode_chapter_split",
+                                }
                                 else episode_playlist.playlist_id
                             ),
                             playlist_start_seconds=playlist_start,
@@ -1839,6 +2501,7 @@ def make_plan(
                             season_source=season_source,
                             episode_number=next_episode + offset,
                             episode_number_source=episode_number_source,
+                            episode_duration_hint_seconds=episode_duration_hint,
                         )
                     )
                 assigned_episodes[counter_key].update(episode_numbers)
@@ -2068,6 +2731,14 @@ def make_plan(
                 f"planned output must not be inside the read-only source directory: {job['output']}"
             )
 
+    extras_content_analysis = _apply_extra_content_analysis(
+        jobs,
+        settings,
+        ffprobe,
+        clip_bounds_cache,
+        warnings,
+    )
+
     return {
         "schema_version": 7,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2112,5 +2783,6 @@ def make_plan(
         "disc_blockers": disc_blockers,
         "recognition": {
             "main_selection_counts": selection_counts,
+            "extras_content_analysis": extras_content_analysis,
         },
     }

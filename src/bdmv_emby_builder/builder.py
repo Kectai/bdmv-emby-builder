@@ -16,19 +16,26 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from statistics import median
 from typing import Any
 import unicodedata
 
+from .episode import partition_episode_chapters, partition_episode_playitems
 from .limits import (
+    EPISODE_BOUNDARY_SHORT_ITEM_SECONDS,
     EPISODE_DURATION_RATIO,
+    EPISODE_GROUP_DURATION_RATIO,
     EPISODE_MAX_SECONDS,
     EPISODE_MIN_SECONDS,
+    EPISODE_PROFILE_DURATION_RATIO,
     IGNORABLE_EXTRA_SUBPATH_TYPES,
     MAX_COPY_BOUNDARY_TOLERANCE_SECONDS,
     MAX_DURATION_TOLERANCE_SECONDS,
+    MAX_EPISODE_INFERENCE_BOUNDARIES,
     PLAY_ALL_MAX_ITEM_SECONDS,
+    SEPARATE_EPISODE_DURATION_RATIO,
 )
-from .mpls import Playlist, parse_mpls
+from .mpls import PlayItem, Playlist, parse_mpls
 from .path_safety import (
     first_symlink,
     first_linklike_component,
@@ -45,12 +52,12 @@ PROCESSING_MODES = {"hardlink_only", "hardlink_remux", "copy_remux"}
 PLAN_SCHEMA_VERSION = 7
 STATE_SCHEMA_VERSION = 7
 SUPPORTED_STATE_SCHEMA_VERSIONS = {4, 5, 6, STATE_SCHEMA_VERSION}
-PLAN_FINGERPRINT_VERSION = 2
+PLAN_FINGERPRINT_VERSION = 3
 BUILD_RESULTS_SCHEMA_VERSION = 1
-# FFmpeg defaults to 10 seconds, which is too large for several-second timestamp
-# resets at Blu-ray seamless-branch boundaries. A logical MPLS timeline is
-# continuous, so normalize jumps larger than one second before MPEG-TS muxing.
-BLURAY_DTS_DELTA_THRESHOLD_SECONDS = "1"
+# FFmpeg defaults to 10 seconds, which is too large for timestamp resets at
+# Blu-ray PlayItem boundaries. A logical MPLS timeline is continuous, so align
+# mux-time correction with the largest forward gap accepted by validation.
+BLURAY_DTS_DELTA_THRESHOLD_SECONDS = "0.25"
 PACKET_MAX_FORWARD_GAP_SECONDS = 0.25
 PACKET_MAX_BACKWARD_JUMP_SECONDS = 0.05
 PACKET_MAX_STREAM_EDGE_GAP_SECONDS = 2.0
@@ -248,6 +255,52 @@ def _validate_plan_schema(plan: dict[str, Any]) -> None:
         if operation not in {"auto", "copy", "remux_m2ts", "remux_mkv"}:
             raise RuntimeError(
                 f"plan job {identifier} has an unsupported operation: {operation!r}"
+            )
+        required_backend = job.get("required_remux_backend")
+        if required_backend not in {None, "concat"}:
+            raise RuntimeError(
+                f"plan job {identifier} has an unsupported required_remux_backend"
+            )
+        selection = job.get("playlist_selection")
+        segment = job.get("playlist_segment")
+        if selection in {"episode_playitem_group", "episode_chapter_split"} and (
+            not isinstance(segment, str) or not segment
+        ):
+            raise RuntimeError(
+                f"plan job {identifier} has a derived episode selection without "
+                "a playlist_segment"
+            )
+        if required_backend == "concat" and (
+            selection not in {
+                "episode_playitem_group",
+                "episode_chapter_split",
+            }
+            or not isinstance(segment, str)
+            or not segment
+        ):
+            raise RuntimeError(
+                f"plan job {identifier} requests concat without a validated "
+                "derived episode segment"
+            )
+        if required_backend == "concat" and operation not in {
+            "auto",
+            "remux_m2ts",
+        }:
+            raise RuntimeError(
+                f"plan job {identifier} requires concat but has incompatible "
+                f"operation {operation!r}"
+            )
+        duration_hint = job.get("episode_duration_hint_seconds")
+        if duration_hint is not None and (
+            isinstance(duration_hint, bool)
+            or not isinstance(duration_hint, (int, float))
+            or not math.isfinite(float(duration_hint))
+            or not EPISODE_MIN_SECONDS
+            <= float(duration_hint)
+            <= EPISODE_MAX_SECONDS
+        ):
+            raise RuntimeError(
+                f"plan job {identifier} has an invalid episode duration hint"
             )
         suffix = Path(portable_relative).suffix.casefold()
         required_suffix = {
@@ -854,6 +907,15 @@ def _job_requires_playlist_remux(job: dict[str, Any]) -> bool:
     )
 
 
+def _job_requires_concat_segment(job: dict[str, Any]) -> bool:
+    return bool(
+        job.get("playlist_segment")
+        and job.get("required_remux_backend") == "concat"
+        and job.get("playlist_selection")
+        in {"episode_playitem_group", "episode_chapter_split"}
+    )
+
+
 def _same_filesystem(source: Path, output: Path) -> bool:
     try:
         return source.stat().st_dev == _nearest_existing(output.parent).stat().st_dev
@@ -867,9 +929,37 @@ def _resolve_operation(
     processing = str(job.get("processing", "copy_remux"))
     if processing not in PROCESSING_MODES:
         raise RuntimeError(f"unsupported processing mode: {processing!r}")
+    configured_operation = job.get("operation", "auto")
+    if job.get("required_remux_backend") == "concat" and configured_operation not in {
+        "auto",
+        "remux_m2ts",
+    }:
+        raise RuntimeError(
+            f"{job['relative_output']}: required concat is incompatible with "
+            f"operation {configured_operation!r}"
+        )
     planned = _planned_operation(job, output)
+    if job.get("required_remux_backend") == "concat" and not (
+        _job_requires_concat_segment(job)
+    ):
+        raise RuntimeError(
+            f"{job['relative_output']}: required concat lacks a validated "
+            "derived episode segment"
+        )
+    if job.get("required_remux_backend") == "concat" and planned not in {
+        "auto",
+        "remux_m2ts",
+    }:
+        raise RuntimeError(
+            f"{job['relative_output']}: required concat is incompatible with "
+            f"operation {planned!r}"
+        )
     if planned != "auto":
-        if job.get("playlist_segment") and planned.startswith("remux"):
+        if (
+            job.get("playlist_segment")
+            and planned.startswith("remux")
+            and not _job_requires_concat_segment(job)
+        ):
             raise RuntimeError(
                 f"{job['relative_output']}: a derived playlist segment cannot be "
                 "remuxed reliably; regenerate the plan so its complete M2TS is copied"
@@ -878,7 +968,23 @@ def _resolve_operation(
             raise HardlinkOnlyBlocked(
                 f"{job['relative_output']}: playlist requires {planned}, not a 1:1 M2TS"
             )
-        return planned, f"plan requested {planned}", None
+        reason = (
+            "validated episode segment requires concat stream-copy"
+            if _job_requires_concat_segment(job)
+            else f"plan requested {planned}"
+        )
+        return planned, reason, None
+    if _job_requires_concat_segment(job):
+        if processing == "hardlink_only":
+            raise HardlinkOnlyBlocked(
+                f"{job['relative_output']}: a derived episode segment requires "
+                "stream-copy remuxing, not a 1:1 M2TS"
+            )
+        return (
+            "remux_m2ts",
+            "validated episode segment requires concat stream-copy",
+            None,
+        )
     source_probe = _probe_media(job["items"][0]["source"], ffprobe)
     tolerance = float(settings.get("copy_boundary_tolerance_seconds", 0.1))
     if _is_full_single_clip(job, source_probe, tolerance) and not _job_requires_playlist_remux(job):
@@ -1004,34 +1110,38 @@ def _validate_job_against_mpls(
     expected_start_ticks = 0
     segment_start = 0
     segment_end = len(playlist.items)
+    chapter_range: tuple[int, int] | None = None
     segment = job.get("playlist_segment")
     if segment is not None:
         if not isinstance(segment, str):
             raise RuntimeError("playlist_segment must be a string or null")
-        match = re.fullmatch(
+        playitem_match = re.fullmatch(
             rf"{re.escape(job['playlist'])}-P([0-9]{{2,5}})(?:-([0-9]{{2,5}}))?",
             segment,
         )
-        if match is None:
+        chapter_match = re.fullmatch(
+            rf"{re.escape(job['playlist'])}-C([0-9]{{2,5}})-([0-9]{{2,5}})",
+            segment,
+        )
+        if playitem_match is None and chapter_match is None:
             raise RuntimeError(
                 f"playlist_segment does not identify playlist {job['playlist']}: "
                 f"{segment!r}"
             )
-        start = int(match.group(1)) - 1
-        end = int(match.group(2) or match.group(1))
-        if start < 0 or end <= start or end > len(playlist.items):
+        if job.get("playlist_selection") in {
+            "episode_playitem_split",
+            "episode_playitem_group",
+            "episode_chapter_split",
+        } and (
+            len(playlist.items) > MAX_EPISODE_INFERENCE_BOUNDARIES
+            or len(playlist.marks) > MAX_EPISODE_INFERENCE_BOUNDARIES
+        ):
             raise RuntimeError(
-                f"playlist_segment is outside the MPLS PlayItems: {segment}"
-            )
-        if end - start != 1:
-            raise RuntimeError(
-                "playlist_segment ranges are not emitted by the planner and cannot "
-                "be validated safely"
+                "derived episode inference exceeds the safe authored-boundary limit"
             )
         stream_dir = mpls_path.parent.parent / "STREAM"
         if (
-            len(playlist.items) < 2
-            or any(item.is_multi_angle for item in playlist.items)
+            any(item.is_multi_angle for item in playlist.items)
             or any(item.connection_condition == 6 for item in playlist.items[1:])
             or len({item.clip_id for item in playlist.items}) != len(playlist.items)
             or any(
@@ -1051,8 +1161,8 @@ def _validate_job_against_mpls(
             )
         ):
             raise RuntimeError(
-                "playlist_segment is not safe for a multi-angle, seamless, repeated-clip, "
-                "or content-SubPath playlist"
+                "playlist_segment is not safe for a multi-angle, seamless, "
+                "repeated-clip, or content-SubPath playlist"
             )
 
         tolerance_ticks = round(copy_boundary_tolerance_seconds * TICKS_PER_SECOND)
@@ -1067,95 +1177,258 @@ def _validate_job_against_mpls(
             )
 
         selection = job.get("playlist_selection")
-        if job.get("kind") == "episode" and selection == "episode_playitem_split":
-            durations = [item.duration_ticks / TICKS_PER_SECOND for item in playlist.items]
-            boundaries_valid = (
-                all(has_entry_boundary(position) for position in range(len(playlist.items)))
-                and min(durations) >= EPISODE_MIN_SECONDS
-                and max(durations) <= EPISODE_MAX_SECONDS
-                and max(durations) / min(durations) <= EPISODE_DURATION_RATIO
-            )
-        elif job.get("kind") == "extras" and selection == "extras_playitem_boundaries":
-            short_play_all = (
-                bool(
-                    set(playlist.subpath_types) & IGNORABLE_EXTRA_SUBPATH_TYPES
+        if playitem_match is not None:
+            start = int(playitem_match.group(1)) - 1
+            end = int(playitem_match.group(2) or playitem_match.group(1))
+            if start < 0 or end <= start or end > len(playlist.items):
+                raise RuntimeError(
+                    f"playlist_segment is outside the MPLS PlayItems: {segment}"
                 )
-                and max(item.duration_ticks for item in playlist.items)
-                <= PLAY_ALL_MAX_ITEM_SECONDS * TICKS_PER_SECOND
-            )
-            needs_standalone = not short_play_all and any(
-                item.connection_condition != 1 for item in playlist.items[1:]
-            )
-            standalone_signatures: set[tuple[str, int, int]] = set()
-            if needs_standalone:
-                standalone_key = str(mpls_path.parent.resolve())
-                cached_signatures = standalone_cache.get(standalone_key)
-                if cached_signatures is None:
-                    cached_signatures = set()
-                    try:
-                        playlist_entries = sorted(
-                            mpls_path.parent.iterdir(),
-                            key=lambda value: value.name.casefold(),
-                        )
-                    except OSError:
-                        playlist_entries = []
-                    for candidate_path in playlist_entries:
-                        if (
-                            candidate_path.suffix.casefold() != ".mpls"
-                            or path_is_linklike(candidate_path)
-                            or not candidate_path.is_file()
-                        ):
-                            continue
-                        try:
-                            candidate_stat = candidate_path.stat()
-                            candidate_key = (
-                                str(candidate_path.resolve()),
-                                candidate_stat.st_dev,
-                                candidate_stat.st_ino,
-                                candidate_stat.st_size,
-                                candidate_stat.st_mtime_ns,
-                            )
-                            candidate_playlist = mpls_cache.get(candidate_key)
-                            if candidate_playlist is None:
-                                candidate_playlist = parse_mpls(candidate_path)
-                                mpls_cache[candidate_key] = candidate_playlist
-                        except (OSError, ValueError):
-                            continue
-                        if len(candidate_playlist.items) == 1:
-                            candidate = candidate_playlist.items[0]
-                            candidate_source = stream_dir / f"{candidate.clip_id}.m2ts"
-                            if (
-                                path_is_linklike(candidate_source)
-                                or not candidate_source.is_file()
-                            ):
-                                continue
-                            cached_signatures.add(
-                                (
-                                    candidate.clip_id,
-                                    candidate.in_ticks,
-                                    candidate.out_ticks,
-                                )
-                            )
-                    standalone_cache[standalone_key] = cached_signatures
-                standalone_signatures = cached_signatures
-            boundaries_valid = all(
-                item.connection_condition == 1
-                or (
-                    has_entry_boundary(position)
-                    and (
-                        short_play_all
-                        or (item.clip_id, item.in_ticks, item.out_ticks)
-                        in standalone_signatures
+            if job.get("kind") == "episode" and selection == "episode_playitem_split":
+                durations = [
+                    item.duration_ticks / TICKS_PER_SECOND
+                    for item in playlist.items
+                ]
+                boundaries_valid = (
+                    end - start == 1
+                    and all(
+                        has_entry_boundary(position)
+                        for position in range(len(playlist.items))
                     )
+                    and min(durations) >= EPISODE_MIN_SECONDS
+                    and max(durations) <= EPISODE_MAX_SECONDS
+                    and max(durations) / min(durations) <= EPISODE_DURATION_RATIO
                 )
-                for position, item in enumerate(playlist.items[1:], 1)
+            elif job.get("kind") == "episode" and selection == "episode_playitem_group":
+                hint = job.get("episode_duration_hint_seconds")
+                item_count = end - start
+                group_duration = sum(
+                    item.duration_ticks for item in playlist.items[start:end]
+                ) / TICKS_PER_SECOND
+                hint_valid = hint is None or (
+                    float(hint) / EPISODE_PROFILE_DURATION_RATIO
+                    <= group_duration
+                    <= float(hint) * EPISODE_PROFILE_DURATION_RATIO
+                )
+                reset_evidence_valid = True
+                if hint is None:
+                    reset_positions = [0]
+                    for position in range(1, len(playlist.items)):
+                        current = playlist.items[position]
+                        previous = playlist.items[position - 1]
+                        following = (
+                            playlist.items[position + 1]
+                            if position + 1 < len(playlist.items)
+                            else None
+                        )
+                        if (
+                            current.connection_condition == 1
+                            and has_entry_boundary(position)
+                            and current.duration_seconds
+                            > EPISODE_BOUNDARY_SHORT_ITEM_SECONDS
+                            and previous.duration_seconds
+                            <= EPISODE_BOUNDARY_SHORT_ITEM_SECONDS
+                            and following is not None
+                            and following.connection_condition != 1
+                        ):
+                            reset_positions.append(position)
+                    reset_positions.append(len(playlist.items))
+                    reset_groups = list(
+                        zip(reset_positions, reset_positions[1:])
+                    )
+                    reset_durations = [
+                        sum(
+                            item.duration_ticks
+                            for item in playlist.items[group_start:group_end]
+                        )
+                        / TICKS_PER_SECOND
+                        for group_start, group_end in reset_groups
+                    ]
+                    reset_evidence_valid = (
+                        len(reset_groups) >= 2
+                        and (start, end) in reset_groups
+                        and min(reset_durations) >= EPISODE_MIN_SECONDS
+                        and max(reset_durations) <= EPISODE_MAX_SECONDS
+                        and max(reset_durations) / min(reset_durations)
+                        <= EPISODE_GROUP_DURATION_RATIO
+                    )
+                boundaries_valid = (
+                    item_count >= 1
+                    and (
+                        (
+                            item_count == 1
+                            and job.get("required_remux_backend") is None
+                        )
+                        or (
+                            item_count >= 2
+                            and job.get("required_remux_backend") == "concat"
+                        )
+                    )
+                    and (start == 0 or has_entry_boundary(start))
+                    and (
+                        end == len(playlist.items)
+                        or (
+                            has_entry_boundary(end)
+                            and playlist.items[end].connection_condition == 1
+                        )
+                    )
+                    and (start == 0 or playlist.items[start].connection_condition == 1)
+                    and EPISODE_MIN_SECONDS
+                    <= group_duration
+                    <= EPISODE_MAX_SECONDS
+                    and hint_valid
+                    and reset_evidence_valid
+                )
+            elif job.get("kind") == "extras" and selection == "extras_playitem_boundaries":
+                if end - start != 1:
+                    boundaries_valid = False
+                else:
+                    short_play_all = (
+                        bool(
+                            set(playlist.subpath_types)
+                            & IGNORABLE_EXTRA_SUBPATH_TYPES
+                        )
+                        and max(item.duration_ticks for item in playlist.items)
+                        <= PLAY_ALL_MAX_ITEM_SECONDS * TICKS_PER_SECOND
+                    )
+                    needs_standalone = not short_play_all and any(
+                        item.connection_condition != 1
+                        for item in playlist.items[1:]
+                    )
+                    standalone_signatures: set[tuple[str, int, int]] = set()
+                    if needs_standalone:
+                        standalone_key = str(mpls_path.parent.resolve())
+                        cached_signatures = standalone_cache.get(standalone_key)
+                        if cached_signatures is None:
+                            cached_signatures = set()
+                            try:
+                                playlist_entries = sorted(
+                                    mpls_path.parent.iterdir(),
+                                    key=lambda value: value.name.casefold(),
+                                )
+                            except OSError:
+                                playlist_entries = []
+                            for candidate_path in playlist_entries:
+                                if (
+                                    candidate_path.suffix.casefold() != ".mpls"
+                                    or path_is_linklike(candidate_path)
+                                    or not candidate_path.is_file()
+                                ):
+                                    continue
+                                try:
+                                    candidate_stat = candidate_path.stat()
+                                    candidate_key = (
+                                        str(candidate_path.resolve()),
+                                        candidate_stat.st_dev,
+                                        candidate_stat.st_ino,
+                                        candidate_stat.st_size,
+                                        candidate_stat.st_mtime_ns,
+                                    )
+                                    candidate_playlist = mpls_cache.get(candidate_key)
+                                    if candidate_playlist is None:
+                                        candidate_playlist = parse_mpls(candidate_path)
+                                        mpls_cache[candidate_key] = candidate_playlist
+                                except (OSError, ValueError):
+                                    continue
+                                if len(candidate_playlist.items) == 1:
+                                    candidate = candidate_playlist.items[0]
+                                    candidate_source = (
+                                        stream_dir / f"{candidate.clip_id}.m2ts"
+                                    )
+                                    if (
+                                        path_is_linklike(candidate_source)
+                                        or not candidate_source.is_file()
+                                    ):
+                                        continue
+                                    cached_signatures.add(
+                                        (
+                                            candidate.clip_id,
+                                            candidate.in_ticks,
+                                            candidate.out_ticks,
+                                        )
+                                    )
+                            standalone_cache[standalone_key] = cached_signatures
+                        standalone_signatures = cached_signatures
+                    boundaries_valid = all(
+                        item.connection_condition == 1
+                        or (
+                            has_entry_boundary(position)
+                            and (
+                                short_play_all
+                                or (item.clip_id, item.in_ticks, item.out_ticks)
+                                in standalone_signatures
+                            )
+                        )
+                        for position, item in enumerate(playlist.items[1:], 1)
+                    )
+            else:
+                boundaries_valid = False
+            if not boundaries_valid:
+                raise RuntimeError(
+                    "playlist_segment does not have planner-verifiable independent "
+                    "boundaries"
+                )
+            expected_start_ticks = sum(
+                item.duration_ticks for item in playlist.items[:start]
             )
+            expected_items = playlist.items[start:end]
+            segment_start = start
+            segment_end = end
         else:
-            boundaries_valid = False
-        if not boundaries_valid:
-            raise RuntimeError(
-                "playlist_segment does not have planner-verifiable independent boundaries"
-            )
+            assert chapter_match is not None
+            if (
+                job.get("kind") != "episode"
+                or selection != "episode_chapter_split"
+                or job.get("required_remux_backend") != "concat"
+                or len(playlist.items) != 1
+            ):
+                raise RuntimeError(
+                    "chapter playlist_segment is only valid for a derived episode"
+                )
+            chapter_boundaries = [*playlist.chapter_ticks, playlist.duration_ticks]
+            start_index = int(chapter_match.group(1)) - 1
+            end_index = int(chapter_match.group(2)) - 1
+            if (
+                start_index < 0
+                or end_index <= start_index
+                or end_index >= len(chapter_boundaries)
+            ):
+                raise RuntimeError(
+                    f"playlist_segment is outside the MPLS chapters: {segment}"
+                )
+            start_ticks = chapter_boundaries[start_index]
+            end_ticks = chapter_boundaries[end_index]
+            duration_seconds = (end_ticks - start_ticks) / TICKS_PER_SECOND
+            hint = job.get("episode_duration_hint_seconds")
+            if (
+                not EPISODE_MIN_SECONDS
+                <= duration_seconds
+                <= EPISODE_MAX_SECONDS
+                or (
+                    hint is not None
+                    and not float(hint) / EPISODE_PROFILE_DURATION_RATIO
+                    <= duration_seconds
+                    <= float(hint) * EPISODE_PROFILE_DURATION_RATIO
+                )
+            ):
+                raise RuntimeError(
+                    "chapter playlist_segment is not an episode-like duration"
+                )
+            parent = playlist.items[0]
+            expected_items = [
+                PlayItem(
+                    0,
+                    parent.clip_id,
+                    parent.codec,
+                    parent.in_ticks + start_ticks,
+                    parent.in_ticks + end_ticks,
+                    parent.connection_condition,
+                    parent.is_multi_angle,
+                    parent.stc_id,
+                )
+            ]
+            expected_start_ticks = start_ticks
+            chapter_range = (start_ticks, end_ticks)
 
         if ffprobe is None:
             raise RuntimeError("ffprobe is required to validate playlist_segment sources")
@@ -1214,12 +1487,6 @@ def _validate_job_against_mpls(
                     "playlist_segment parent PlayItems must each cover a complete "
                     f"source M2TS: {parent_source}"
                 )
-        expected_start_ticks = sum(
-            item.duration_ticks for item in playlist.items[:start]
-        )
-        expected_items = playlist.items[start:end]
-        segment_start = start
-        segment_end = end
 
     planned_start_ticks = round(float(job.get("playlist_start_seconds", 0.0)) * 45_000)
     if planned_start_ticks != expected_start_ticks:
@@ -1285,24 +1552,37 @@ def _validate_job_against_mpls(
         raise RuntimeError("SubPath semantics do not match the MPLS structure")
 
     chapter_starts: set[int] = set()
-    offsets: list[int] = []
-    accumulated = 0
-    for expected in expected_items:
-        offsets.append(accumulated)
-        accumulated += expected.duration_ticks
-    for mark in playlist.marks:
-        if (
-            mark.mark_type != 1
-            or not segment_start <= mark.play_item_ref < segment_end
-        ):
-            continue
-        local_index = mark.play_item_ref - segment_start
-        expected = expected_items[local_index]
-        local = min(
-            expected.duration_ticks,
-            max(0, mark.mark_ticks - expected.in_ticks),
-        )
-        chapter_starts.add(offsets[local_index] + local)
+    if chapter_range is not None:
+        range_start, range_end = chapter_range
+        parent = playlist.items[0]
+        for mark in playlist.marks:
+            if mark.mark_type != 1 or mark.play_item_ref != 0:
+                continue
+            logical = min(
+                parent.duration_ticks,
+                max(0, mark.mark_ticks - parent.in_ticks),
+            )
+            if range_start <= logical < range_end:
+                chapter_starts.add(logical - range_start)
+    else:
+        offsets: list[int] = []
+        accumulated = 0
+        for expected in expected_items:
+            offsets.append(accumulated)
+            accumulated += expected.duration_ticks
+        for mark in playlist.marks:
+            if (
+                mark.mark_type != 1
+                or not segment_start <= mark.play_item_ref < segment_end
+            ):
+                continue
+            local_index = mark.play_item_ref - segment_start
+            expected = expected_items[local_index]
+            local = min(
+                expected.duration_ticks,
+                max(0, mark.mark_ticks - expected.in_ticks),
+            )
+            chapter_starts.add(offsets[local_index] + local)
     if chapter_starts and min(chapter_starts) > TICKS_PER_SECOND:
         chapter_starts.add(0)
     expected_chapters = sorted(
@@ -1318,6 +1598,126 @@ def _validate_job_against_mpls(
         or sorted(set(planned_chapters)) != expected_chapters
     ):
         raise RuntimeError("chapter_ticks do not match the MPLS marks")
+
+
+def _episode_profile_key(job: dict[str, Any]) -> tuple[str, str]:
+    library = job["relative_output"].replace("\\", "/").split("/", 1)[0]
+    return (
+        unicodedata.normalize("NFC", library).casefold(),
+        unicodedata.normalize("NFC", str(job.get("edition") or "")).casefold(),
+    )
+
+
+def _validated_episode_duration_hints(
+    jobs: list[dict[str, Any]],
+) -> dict[tuple[str, str], float]:
+    """Rebuild peer profiles only from complete, independently split parents."""
+    parent_groups: dict[
+        tuple[tuple[str, str], str, str], list[dict[str, Any]]
+    ] = {}
+    for job in jobs:
+        if (
+            job.get("kind") == "episode"
+            and job.get("playlist_selection") == "episode_playitem_split"
+        ):
+            parent_groups.setdefault(
+                (
+                    _episode_profile_key(job),
+                    str(job["disc"]),
+                    str(Path(job["mpls_path"]).resolve()),
+                ),
+                [],
+            ).append(job)
+
+    profile_durations: dict[tuple[str, str], list[float]] = {}
+    for (profile_key, _disc, mpls_text), peers in parent_groups.items():
+        playlist = parse_mpls(Path(mpls_text))
+        if len(playlist.items) < 2:
+            continue
+        expected_segments = {
+            f"{playlist.playlist_id}-P{index:02d}"
+            for index in range(1, len(playlist.items) + 1)
+        }
+        actual_segments = {job.get("playlist_segment") for job in peers}
+        if actual_segments != expected_segments or len(peers) != len(
+            expected_segments
+        ):
+            continue
+        profile_durations.setdefault(profile_key, []).extend(
+            float(job["duration_seconds"]) for job in peers
+        )
+
+    return {
+        key: float(median(values))
+        for key, values in profile_durations.items()
+        if len(values) >= 2
+        and max(values) / min(values) <= SEPARATE_EPISODE_DURATION_RATIO
+    }
+
+
+def _validate_derived_episode_partitions(
+    jobs: list[dict[str, Any]], tolerance_seconds: float
+) -> None:
+    """Require every derived episode set to match planner-reconstructable proof."""
+    trusted_hints = _validated_episode_duration_hints(jobs)
+    derived: dict[
+        tuple[str, str, tuple[str, str]], list[dict[str, Any]]
+    ] = {}
+    for job in jobs:
+        selection = job.get("playlist_selection")
+        if selection not in {"episode_playitem_group", "episode_chapter_split"}:
+            continue
+        derived.setdefault(
+            (
+                str(Path(job["mpls_path"]).resolve()),
+                str(selection),
+                _episode_profile_key(job),
+            ),
+            [],
+        ).append(job)
+
+    for (mpls_text, selection, profile_key), siblings in derived.items():
+        playlist = parse_mpls(Path(mpls_text))
+        expected_hint = trusted_hints.get(profile_key)
+        for job in siblings:
+            planned_hint = job.get("episode_duration_hint_seconds")
+            if expected_hint is None:
+                if planned_hint is not None:
+                    raise RuntimeError(
+                        "episode duration hint is not backed by a complete "
+                        "independent peer profile"
+                    )
+            elif planned_hint is None or not math.isclose(
+                float(planned_hint), expected_hint, rel_tol=0.0, abs_tol=1 / 45_000
+            ):
+                raise RuntimeError(
+                    "episode duration hint does not match the validated peer profile"
+                )
+
+        if selection == "episode_playitem_group":
+            groups = partition_episode_playitems(
+                playlist, expected_hint, tolerance_seconds
+            )
+            expected_segments = {
+                f"{playlist.playlist_id}-P{start + 1:02d}-{end:02d}"
+                for start, end in groups
+            }
+        else:
+            groups = partition_episode_chapters(playlist, expected_hint)
+            expected_segments = {
+                f"{playlist.playlist_id}-C{start + 1:02d}-{end + 1:02d}"
+                for start, end in groups
+            }
+        actual_segments = {job.get("playlist_segment") for job in siblings}
+        if (
+            len(groups) < 2
+            or actual_segments != expected_segments
+            or len(siblings) != len(expected_segments)
+        ):
+            raise RuntimeError(
+                "derived episode segments do not match the complete "
+                "planner-verifiable partition"
+            )
 
 
 def _validate_plan_paths(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
@@ -1468,6 +1868,14 @@ def _validate_plan_paths(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> No
             raise RuntimeError(
                 "missing_sources must be a subset of the job PlayItem sources"
             )
+    _validate_derived_episode_partitions(
+        jobs,
+        float(
+            plan.get("settings", {}).get(
+                "copy_boundary_tolerance_seconds", 0.1
+            )
+        ),
+    )
 
 
 def validate_plan(plan: Any) -> None:
@@ -2098,7 +2506,11 @@ def _job_plan_fingerprint(job: dict[str, Any]) -> str:
         "relative_output": job.get("relative_output"),
         "playlist": job.get("playlist"),
         "playlist_segment": job.get("playlist_segment"),
+        "required_remux_backend": job.get("required_remux_backend"),
         "playlist_start_seconds": job.get("playlist_start_seconds", 0),
+        "episode_duration_hint_seconds": job.get(
+            "episode_duration_hint_seconds"
+        ),
         "duration_seconds": job.get("duration_seconds"),
         "subpath_count": job.get("subpath_count", 0),
         "subpath_types": job.get("subpath_types", []),
@@ -2430,7 +2842,11 @@ def _execute_one_job(
     if operation.startswith("remux") and output.suffix.casefold() == ".m2ts":
         if ffmpeg is None:
             ffmpeg = _resolve_tool(settings, "ffmpeg", "BDMV_EMBY_FFMPEG", "ffmpeg")
-        backend = _select_m2ts_backend(settings, ffmpeg)
+        backend = (
+            "concat"
+            if _job_requires_concat_segment(job)
+            else _select_m2ts_backend(settings, ffmpeg)
+        )
     if _job_requires_playlist_remux(job) and backend != "bluray":
         raise RuntimeError(
             f"{job['relative_output']}: SubPath or multi-angle content requires "
@@ -2607,7 +3023,11 @@ def _execute_one_job(
                     ffmpeg = _resolve_tool(
                         settings, "ffmpeg", "BDMV_EMBY_FFMPEG", "ffmpeg"
                     )
-                backend = backend or _select_m2ts_backend(settings, ffmpeg)
+                backend = backend or (
+                    "concat"
+                    if _job_requires_concat_segment(job)
+                    else _select_m2ts_backend(settings, ffmpeg)
+                )
                 if _job_requires_playlist_remux(job) and backend != "bluray":
                     raise RuntimeError(
                         f"{job['relative_output']}: SubPath or multi-angle content "

@@ -12,11 +12,13 @@
 python3 -m unittest discover -s tests -v
 ```
 
-当前共 127 项测试，覆盖：
+当前共 148 项测试，覆盖：
 
 - MPLS 长度、区段、PlayItem、Mark、连接条件、多角度、SubPath 和章节边界；
-- movie、series、bonus 规划，剧集 Play-All 拆集、季号/集号及 edition 隔离；
+- movie、series、bonus 规划，单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号及 edition 隔离；
 - 菜单循环、短交互导航、重复媒体和缺失 M2TS 的显式审计；
+- 低置信度短 extras 的全部音轨聚合、无音轨、正常音频短路、静态抽样证据和只提示不排除行为；
+- planner/builder 共用的完整分集证明、伪造时长提示/孤立 concat 拒绝及异常大边界数量保护；
 - UTF-8/UTF-16 文件名限制、标准 BDMV/PLAYLIST/STREAM 关系、目标路径逃逸和 Windows ffconcat/进程检查；
 - `copy_remux`、`hardlink_remux`、`hardlink_only` 的操作解析、整盘阻断和现有文件身份约束；
 - 剩余空间预检、目标锁、随机 partial、原子替换和 Ctrl-C 审计恢复；
@@ -32,7 +34,7 @@ python3 -m unittest discover -s tests -v
 
 - 单段电影正片与 1080p/4K 多版本；
 - 同一电影跨多个 M2TS 的 seamless playlist；
-- 两张盘连续收录多集的剧集 Play-All；
+- 多张盘连续收录多集的剧集 Play-All，包括一集一个 M2TS 和一集跨多个 M2TS；
 - 纯特典盘、花絮 Play-All 和大量超短交互导航；
 - 直接复制、硬链接和 libbluray stream-copy 重封装。
 
@@ -48,6 +50,10 @@ python3 -m unittest discover -s tests -v
 - `connection_condition=6`、局部 clip、多角度或内容型 SubPath 会阻止拆集。
 
 若只有多个时长相近的独立 playlist、但不存在 Play-All 顺序旁证，规划器不会凭 playlist 编号猜测它们都是 episode：libbluray 选中的标题作为单集，其余保留为 extras 候选并产生边界警告。
+
+另一套多盘剧集的前半部分是一集一个完整 M2TS，后半部分则每集由 3–5 个完整 M2TS 组成。规划器从前半部分得到约 24 分钟的稳定 episode 中位时长，再结合后半部分的非无缝 Entry Mark 分组为正确集数。代表性分集由 5 个 M2TS 使用 concat stream-copy 生成：计划时长与成品相差小于 0.02 秒，H.264 1080p 视频和 PCM 音频轨道保持一致，逐包时间线校验通过。
+
+单个完整 M2TS 包含两集或多集的结构由合成回归覆盖：程序优先采用连续覆盖父范围的原盘独立单集 playlist；仅在没有此类旁证、且章节重复结构或同行盘时长轮廓能完整分区时，才生成章节派生分集。等时长均匀章节不会单独构成多集证据。
 
 ## 多段电影验证
 
