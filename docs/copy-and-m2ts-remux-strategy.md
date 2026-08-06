@@ -32,7 +32,7 @@ connection_condition=6、局部切点、重复 clip、内容型 SubPath 或无�
 - `hardlink_remux`：满足条件的内容硬链接，真正需要组合或裁切的内容无损重封装；完整单段在跨文件系统或运行时链接失败时降级为逐字节复制，不做没有必要且兼容性更差的重封装。
 - `copy_remux`：满足条件的内容复制，其余内容无损重封装，是默认值。
 
-硬链接和重封装使用相同的 Emby 媒体命名；区别写入 dry-run、构建结果及 `.bdmv-emby-state.json`。`bdmv-emby-builder status DESTINATION` 会验证所有成品是否存在、用文件身份复核硬链接，并有限重定位人工移动的 copy/remux 成品。
+硬链接和重封装使用相同的 Emby 媒体命名；区别写入 dry-run、构建结果及 `.bdmv-emby-state.json`。`bdmv-emby-builder status DESTINATION` 会验证所有成品是否存在，并在保留原文件名时有限重定位人工移动的成品：copy/remux 使用文件大小与完整 SHA-256，hardlink 使用与源共享的文件身份。
 
 ## 2. 为什么一个 playlist 可以引用多个 M2TS
 

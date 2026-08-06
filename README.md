@@ -174,7 +174,7 @@ bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 
 ### 附加内容
 
-`disc_type` 只描述盘的主要用途，不把内容强制限定为正片、剧集或花絮。`movie` 和 `series` 盘会先确定正片或 episode，再从同一张盘剩余的有效 playlist 中选择附加内容；候选必须与已选内容在语义上不同、不是导航或菜单循环、引用的源 M2TS 均存在，并达到 `extra_min_seconds`（默认 60 秒）。`bonus` 盘不选择正片，而是对全部有效 playlist 使用相同的附加内容筛选和去重规则。由于 BDMV 通常不提供可靠的自然语言花絮名称，extras 仍属于需要人工复核的保守分类。
+`disc_type` 只描述盘的主要用途，不把内容强制限定为正片、剧集或花絮。`movie` 和 `series` 盘会先确定正片或 episode，再从同一张盘剩余的有效 playlist 中选择附加内容；候选必须与已选内容在语义上不同、不是导航或菜单循环、引用的源 M2TS 均存在，并达到 `extra_min_seconds`（默认 60 秒）。`bonus` 盘不选择正片，而是对全部有效 playlist 使用相同的附加内容筛选和去重规则。由于 BDMV 通常不提供可靠的自然语言花絮名称，extras 仍属于需要人工复核的保守分类；程序不会继续猜测它属于预告、访谈、删减片段或幕后花絮。
 
 附加内容默认写入作品目录下的 `[settings].extras_folder`（默认 `extras`），而不是写入剧集的 `Season XX` 目录。文件名使用以下稳定格式：
 
@@ -182,7 +182,29 @@ bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 <盘标题> - PL<playlist编号> - <HHMMSS>.<容器>
 ```
 
-盘标题优先取 BDMV META，缺失时使用盘目录名；配置了 `edition` 时会附加版本标签。若一个 Play-All 被可靠地拆为多个独立附加视频，编号会增加分段后缀，例如 `Bonus Disc - PL00004-P01 - 000042.m2ts`。不同盘生成同名 extras 时不会覆盖已有任务：规划器依次尝试附加盘目录名、盘路径哈希或任务 ID 片段来消除冲突，并在计划的 `output_disambiguation` 字段记录所用方式。构建后可以在派生目录中按实际内容自行更名或移动。
+盘标题优先取 BDMV META，缺失时使用盘目录名；配置了 `edition` 时会附加版本标签。若一个 Play-All 被可靠地拆为多个独立附加视频，编号会增加分段后缀，例如 `Bonus Disc - PL00004-P01 - 000042.m2ts`。不同盘生成同名 extras 时不会覆盖已有任务：规划器依次尝试附加盘目录名、盘路径哈希或任务 ID 片段来消除冲突，并在计划的 `output_disambiguation` 字段记录所用方式。
+
+#### 人工整理与 Emby 目录规范
+
+当前版本默认把所有已识别的附加内容统一输出到作品目录下的 `extras/`，不会自动分配到更细的语义目录。推荐的 TOML 配置可通过 `[settings].extras_folder` 把本次任务的统一输出目录改成另一个 Emby 支持的名称，但这只是整批换用一个目录，不会逐条判断内容类别。建议先播放确认内容，再在 Emby 派生目录中人工更名并移动。
+
+Emby 官方支持以下附加内容子目录名：
+
+- `extras`
+- `specials`
+- `shorts`
+- `scenes`
+- `featurettes`
+- `behind the scenes`
+- `deleted scenes`
+- `interviews`
+- `trailers`
+
+电影附加内容目录必须直接位于电影目录下，不能嵌套。例如应使用 `Movie Name (Year)/behind the scenes/video.m2ts`，不能使用 `Movie Name (Year)/extras/behind the scenes/video.m2ts`。电影正片应先存在于该电影目录中，再加入附加内容，以降低误识别风险。上述不同类型最终都会显示在 Emby 详情页的 Extras 区域。参见 [Emby Movie Naming：Movie extras](https://emby.media/support/articles/Movie-Naming.html#movie-extras)。
+
+剧集附加内容可以放在剧集、季或单集层级的上述目录中。若内容本身是需要作为特殊集参与刮削和播放顺序的正式 Special，应放入剧集下的 `Season 0`、`Season 00` 或 `Specials` 季目录，并命名为 `Series Name S00E01.ext` 等形式；这与普通 Extras 附件不同。参见 [Emby TV Naming：TV extras 与 Specials](https://emby.media/support/articles/TV-Naming.html#tv-extras)。
+
+只移动文件且保留原文件名时，`status` 可以在目标库内有限重定位并复核成品；同时改名后，项目状态仍记录旧名称，`status` 会将旧路径报告为缺失。完成最终人工整理并让 Emby 重新扫描后，可把这部分文件视为由用户维护。硬链接成品可以移动或重命名目录项，但不能原地修改文件内容，否则原 BDMV 中共享的内容也会改变。
 
 ### 处理策略
 
@@ -223,7 +245,7 @@ bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 |---|---:|---|
 | `extra_min_seconds` | `60` | 附加内容候选最低时长 |
 | `container` | `"m2ts"` | 输出容器；推荐 `m2ts`，兼容 `mkv` |
-| `extras_folder` | `"extras"` | Emby 附加内容目录 |
+| `extras_folder` | `"extras"` | 本次任务统一使用的 Emby 附加内容目录；可选值见“人工整理与 Emby 目录规范” |
 | `remux_backend` | `"auto"` | `auto`、`bluray` 或显式接受限制的 `concat` |
 | `copy_boundary_tolerance_seconds` | `0.1` | 判断完整覆盖源 M2TS 的边界误差，可配置范围 0–0.5 秒 |
 | `duration_tolerance_seconds` | `2.0` | 成品相对 MPLS 逻辑时长的允许误差，可配置范围 0–5 秒 |
@@ -275,7 +297,7 @@ EmbyTV/
 | `.bdmv-emby-build.lock` | 可常驻的 OS 独占锁锚点；文件存在不代表正在构建 |
 | `.bdmv-emby-work/` | 构建工作目录 |
 
-已有目标文件默认不会重写，而会重新校验并补建或刷新状态；只有 `--overwrite` 会替换同名目标目录项。已有 copy 必须与源 M2TS 的完整 SHA-256 一致；已有 remux 必须同时匹配当前版本的计划指纹、实际 operation/backend 与完整 SHA-256；已有 hardlink 必须仍与源共享文件身份。`status` 会检查缺失、内容变化和硬链接文件身份，并用文件大小与完整 SHA-256 有限重定位人工移动的 copy/remux 成品；重定位不会把记录中的原盘源路径当作成品，存在异常时返回非零状态码。
+已有目标文件默认不会重写，而会重新校验并补建或刷新状态；只有 `--overwrite` 会替换同名目标目录项。已有 copy 必须与源 M2TS 的完整 SHA-256 一致；已有 remux 必须同时匹配当前版本的计划指纹、实际 operation/backend 与完整 SHA-256；已有 hardlink 必须仍与源共享文件身份。`status` 会检查缺失、内容变化和硬链接文件身份，并在保留原文件名时有限重定位人工移动的成品：copy/remux 使用文件大小与完整 SHA-256，hardlink 使用与源共享的文件身份；重定位不会把记录中的原盘源路径当作成品，存在异常时返回非零状态码。
 
 ## 安全与隐私
 
