@@ -8,7 +8,7 @@ BDMV → Emby Builder 只读分析 Blu-ray BDMV，识别电影、剧集和附加
 
 ## 功能范围
 
-- 递归发现单张或多张 BDMV，读取 META、MPLS、PlayItem、Entry Mark、in/out、章节、连接条件、多角度、STC 和 SubPath；
+- 递归发现单张或多张 BDMV，按实际磁盘大小写读取 BDMV/PLAYLIST/STREAM/META、MPLS/M2TS，解析 PlayItem、Entry Mark、in/out、章节、连接条件、多角度、STC 和 SubPath；
 - 离线识别电影主标题、剧集 episode 和附加内容，不查询网络元数据；
 - 拆分剧集型 Play-All：支持一集对应一个 PlayItem、一集由多个完整 PlayItem 组成，以及一个 M2TS 由独立子 playlist 或重复章节结构划分为多集；
 - 拆分边界可靠的花絮 Play-All，排除重复 playlist、菜单循环及高密度超短交互导航；
@@ -43,6 +43,8 @@ BDMV → Emby Builder 只读分析 Blu-ray BDMV，识别电影、剧集和附加
 逻辑边界综合使用源文件完整覆盖、clip 唯一性、Entry Mark、连接条件、多角度、SubPath、时长分布及其他 playlist 的旁证。`connection_condition=6`、重复 clip、多角度、内容型 SubPath 或不可靠边界不会被拆分。
 
 电影主标题优先采用本盘 FFmpeg/libbluray 的相关标题结果；不可用时才降级为本盘最长有效候选并生成警告。同一 META 系列其他盘的选择规律只写入审核提示，绝不按跨盘 playlist 编号覆盖本盘结论，因为 MPLS 编号只在各自光盘内有意义。全部规则只读取本地数据。
+
+Python 解析器会按磁盘实际大小写处理 BDMV、PLAYLIST、STREAM、META、MPLS 和 M2TS，完整单 M2TS 的复制或硬链接不受影响。libbluray 自身在大小写敏感文件系统上要求标准拼写；遇到混合大小写结构时，规划器跳过 libbluray 主标题探测并警告，普通 M2TS 重封装也会停止而不会隐式降级。可以使用保持原盘只读的规范大小写副本，或在确认不存在多角度和内容型 SubPath 后显式设置 `remux_backend = "concat"`。
 
 更完整的设计、边界和实现依据见[直接复制与必要时重封装方案](docs/copy-and-m2ts-remux-strategy.md)。
 
@@ -254,7 +256,7 @@ Emby 官方支持以下附加内容子目录名：
 | `extra_min_seconds` | `60` | 附加内容候选最低时长 |
 | `container` | `"m2ts"` | 输出容器；推荐 `m2ts`，兼容 `mkv` |
 | `extras_folder` | `"extras"` | 本次任务统一使用的 Emby 附加内容目录；可选值见“人工整理与 Emby 目录规范” |
-| `remux_backend` | `"auto"` | `auto`、`bluray` 或显式接受限制的 `concat` |
+| `remux_backend` | `"auto"` | `auto`、`bluray` 或显式接受限制的 `concat`；混合大小写结构需要规范化副本或显式 `concat` |
 | `copy_boundary_tolerance_seconds` | `0.1` | 判断完整覆盖源 M2TS 的边界误差，可配置范围 0–0.5 秒 |
 | `duration_tolerance_seconds` | `2.0` | 成品相对 MPLS 逻辑时长的允许误差，可配置范围 0–5 秒 |
 | `minimum_free_space_bytes` | `5368709120` | 目标卷固定最小剩余空间 |
@@ -332,7 +334,7 @@ TOML、scan、plan、results 和 state 通常包含绝对路径、目录名和�
 python3 -m unittest discover -s tests -v
 ```
 
-当前 148 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、发行目录标题清洗、跨平台路径、BDMV 结构与链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
+当前 152 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、发行目录标题清洗、大小写混合的 BDMV 结构及碰撞拒绝、跨平台路径、链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
 
 真实数据验证覆盖多张 BDMV、电影主盘、纯特典盘、多盘剧集、一集一个 M2TS、一集跨多个 M2TS、1080p/4K、多段 seamless branching 正片及直接复制/硬链接/重封装。记录见[验证报告](examples/VALIDATION.md)。
 

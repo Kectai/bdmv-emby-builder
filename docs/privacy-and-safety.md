@@ -39,7 +39,7 @@ git grep -n "/Users\|/Volumes\|[A-Za-z]:\\\\Users" -- ':!docs/privacy-and-safety
 - 计划和执行都校验源、目标及每个文件的解析后路径，防止越出声明根目录；
 - 审计 JSON 必须使用 `.json` 文件名，并会先排除源目录、整个目标媒体库、输入配置/计划、媒体成品和内部控制路径；失败处理也不会向已判定危险的结果路径写入；
 - 路径边界把大小写差异和 Unicode 规范化差异保守地视作同一路径，避免同一计划跨 APFS、NTFS 和大小写敏感文件系统时改变安全含义；
-- 扫描、规划和执行会校验 BDMV、PLAYLIST、STREAM、MPLS、M2TS 与 META 的标准结构关系；执行计划必须显式携带真实 BDMV 路径，MPLS 必须直属其 `PLAYLIST`，源片段必须是其 `STREAM` 下的规范五位编号 M2TS；执行前还会重新解析 MPLS，并逐项绑定 clip、顺序、in/out、分段起点和总时长，不再从计划字段猜测 libbluray 内容或根目录；为避免嵌套链接和 libbluray 隐式读取改变边界或阻塞，BDMV 树内不接受符号链接、Windows junction、reparse point、FIFO、socket 或设备文件；MPLS 与 META 采用有大小上限的普通文件读取；
+- 扫描、规划和执行会校验 BDMV、PLAYLIST、STREAM、MPLS、M2TS 与 META 的标准结构关系；结构目录和文件扩展名按大小写无关规则寻找，但计划始终记录并复核唯一的实际磁盘路径，同目录出现仅大小写或 Unicode 规范化不同的冲突项时，扫描器与不可信计划执行器都会拒绝任意选取；执行计划必须显式携带真实 BDMV 路径，MPLS 必须直属其实际 `PLAYLIST`，源片段必须是实际 `STREAM` 下与 MPLS clip 唯一对应的规范五位编号 M2TS；执行前还会重新解析 MPLS，并逐项绑定 clip、顺序、in/out、分段起点和总时长，不再从计划字段猜测 libbluray 内容或根目录；libbluray 在大小写敏感系统上只能接收规范路径拼写，混合大小写盘的探测会带警告降级，需要重封装时则要求规范化只读副本或用户显式接受 `concat`；为避免嵌套链接和 libbluray 隐式读取改变边界或阻塞，BDMV 树内不接受符号链接、Windows junction、reparse point、FIFO、socket 或设备文件；MPLS 与 META 采用有大小上限的普通文件读取；
 - 媒体输出必须是目标根下的规范相对文件路径，不能等于目标根，也不能进入 `.bdmv-emby-state.json`、`.bdmv-emby-build.lock` 或 `.bdmv-emby-work`；
 - 媒体路径分段同时遵守 Windows 尾随点/空格、设备名、控制字符和长度限制，避免计划跨平台后指向不同文件；工作控制文件通过同目录临时文件原子替换，不跟随预置的叶子符号链接或硬链接；
 - 目标目录不能位于源目录内；即使目标根是源目录的父目录，具体输出也不能进入源 BDMV；

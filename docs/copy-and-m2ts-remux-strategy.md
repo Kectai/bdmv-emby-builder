@@ -108,6 +108,8 @@ FFmpeg 官方说明：<https://ffmpeg.org/ffmpeg-protocols.html#bluray>
 remux_backend = "concat"
 ```
 
+libbluray 使用 Blu-ray 规范中的固定路径拼写。在 Linux 等大小写敏感文件系统上，`bDmV`、`pLaYlIsT`、大写 `.MPLS` 等实际结构可由本项目的 Python 解析器读取，但不能可靠地交给 libbluray。规划器会跳过该盘的 libbluray 主标题探测并记录降级警告；若普通任务最终需要 M2TS 重封装，`auto`/`bluray` 会在写入前明确停止。用户可以从只读原盘制作规范大小写副本，或在确认任务不包含多角度和内容型 SubPath 后显式选择 `concat`。程序不会通过链接树或复制整盘缓存来伪造结构，也不会静默改变后端。
+
 派生分集是受限例外：libbluray 不能可靠地从父 playlist 中途 seek，因此 `episode_playitem_group` 和 `episode_chapter_split` 在规划器证明边界后，会由执行器重新解析 MPLS、从计划内完整独立分集重建可信时长轮廓，并使用与规划器共用的算法核对整组分区；缺段、伪造时长提示或孤立的 concat 声明都会被拒绝。验证通过后强制使用 concat stream-copy。前者的每个 PlayItem 必须完整覆盖一个不同的源 M2TS；后者的父 PlayItem 必须完整覆盖单个 M2TS，起止点必须来自 MPLS Entry Mark 章节。异常多的候选边界会安全保留为单个逻辑视频，避免无界分区计算。它们不受用户的全局 backend 偏好影响，也不能用于多角度、重复 clip、`connection_condition=6` 或内容型 SubPath。
 
 ## 4. 依赖与跨平台策略

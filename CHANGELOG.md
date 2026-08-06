@@ -24,6 +24,8 @@
 - 统一规划器与构建器的文件名长度预算，扩展名计入 UTF-8/UTF-16 上限。
 - 计划执行强制校验真实 BDMV/PLAYLIST/STREAM 结构并移除 libbluray 根目录回退，阻止伪造计划扩大源读取边界。
 - BDMV 遍历拒绝 Windows junction/reparse point、FIFO、socket 和设备文件；MPLS/META/state/lock 只接受有界普通文件，避免越界披露或特殊文件阻塞。
+- BDMV、PLAYLIST、STREAM、META/DL 目录及 MPLS、M2TS、BDMT XML 文件改为按实际磁盘大小写解析，扫描、规划和执行共用真实路径；大小写或 Unicode 规范化冲突仍会安全拒绝。
+- 混合大小写结构不再误交给使用固定规范路径的 libbluray：主标题探测带警告降级，需要普通 M2TS 重封装时要求规范化只读副本或显式 `concat`；执行器同时复核 MPLS/M2TS 的唯一实际路径，拒绝修改计划绕过大小写碰撞。
 - 显式 copy/remux operation 必须与 `.m2ts`/`.mkv` 输出扩展名一致，保证实际容器与结果、state、status 审计一致。
 - 源目录必须选择 BDMV 的盘根或更上层，不再接受直接以 `BDMV` 本身作为任务根，确保 libbluray 输入不越出声明边界。
 - POSIX 上工具新建的媒体目录使用 `0755`，copy/remux 成品在原子替换前统一设为 `0644`；已有目录和 hardlink 源文件权限不变。

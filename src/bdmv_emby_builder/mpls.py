@@ -7,7 +7,7 @@ import struct
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .path_safety import read_bounded_regular_file
 
@@ -129,7 +129,27 @@ class Playlist:
             starts.add(0)
         return sorted(x for x in starts if 0 <= x < self.duration_ticks)
 
-    def to_dict(self, stream_dir: Path) -> dict[str, Any]:
+    def to_dict(
+        self,
+        stream_dir: Path,
+        stream_path_resolver: Callable[[str], Path] | None = None,
+    ) -> dict[str, Any]:
+        def stream_path(clip_id: str) -> Path:
+            if stream_path_resolver is not None:
+                return stream_path_resolver(clip_id)
+            return stream_dir / f"{clip_id}.m2ts"
+
+        def item_row(item: PlayItem) -> dict[str, Any]:
+            source = stream_path(item.clip_id)
+            return {
+                **asdict(item),
+                "duration_ticks": item.duration_ticks,
+                "duration_seconds": item.duration_seconds,
+                "duration": clock(item.duration_seconds),
+                "stream_path": str(source),
+                "stream_exists": source.is_file(),
+            }
+
         return {
             "playlist_id": self.playlist_id,
             "path": str(self.path),
@@ -139,17 +159,7 @@ class Playlist:
             "subpath_types": list(self.subpath_types),
             "mark_count": len(self.marks),
             "chapter_count": len(self.chapter_ticks),
-            "items": [
-                {
-                    **asdict(item),
-                    "duration_ticks": item.duration_ticks,
-                    "duration_seconds": item.duration_seconds,
-                    "duration": clock(item.duration_seconds),
-                    "stream_path": str(stream_dir / f"{item.clip_id}.m2ts"),
-                    "stream_exists": (stream_dir / f"{item.clip_id}.m2ts").is_file(),
-                }
-                for item in self.items
-            ],
+            "items": [item_row(item) for item in self.items],
             "chapter_ticks": self.chapter_ticks,
         }
 

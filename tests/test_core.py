@@ -29,6 +29,7 @@ from bdmv_emby_builder.builder import (
     _partial_job_token,
     _resolve_operation,
     _relocation_candidates,
+    _select_job_m2ts_backend,
     _stream_signature,
     _validate_packet_timeline,
     _validate_derived_episode_partitions,
@@ -1309,6 +1310,225 @@ class CoreTests(unittest.TestCase):
             (bdmv / "STREAM").mkdir()
             self.assertEqual(discover_bdmv(bdmv), [])
             self.assertEqual(discover_bdmv(bdmv.parent), [bdmv.resolve()])
+
+    def test_mixed_case_bdmv_layout_scans_plans_and_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            bdmv = source_root / "Disc" / "bDmV"
+            playlist_dir = bdmv / "pLaYlIsT"
+            stream_dir = bdmv / "sTrEaM"
+            metadata_dir = bdmv / "mEtA" / "dL"
+            playlist_dir.mkdir(parents=True)
+            stream_dir.mkdir()
+            metadata_dir.mkdir(parents=True)
+            playlist_path = playlist_dir / "00000.MPLS"
+            stream_path = stream_dir / "00000.M2TS"
+            self._write_mpls(
+                playlist_path,
+                [("00000", 0, 45_000 * 3600)],
+                [(0, 0)],
+            )
+            stream_path.write_bytes(b"payload")
+            (metadata_dir / "BDMT_JPN.XML").write_text(
+                "<disclib><discinfo><title><name>大小写测试</name></title>"
+                "</discinfo></disclib>",
+                encoding="utf-8",
+            )
+
+            discs = scan(source_root)
+            self.assertEqual(len(discs), 1)
+            disc = discs[0]
+            self.assertEqual(disc.bdmv_path, bdmv.resolve())
+            self.assertEqual(disc.playlist_dir, playlist_dir.resolve())
+            self.assertEqual(disc.stream_dir, stream_dir.resolve())
+            self.assertEqual(disc.stream_path("00000"), stream_path.resolve())
+            self.assertEqual(disc.metadata_titles, {"jpn": "大小写测试"})
+            self.assertEqual(
+                [value.path for value in disc.playlists], [playlist_path.resolve()]
+            )
+            item = disc.to_dict()["playlists"][0]["items"][0]
+            self.assertEqual(item["stream_path"], str(stream_path.resolve()))
+            self.assertTrue(item["stream_exists"])
+
+            with (
+                patch(
+                    "bdmv_emby_builder.planner.subprocess.run",
+                    wraps=subprocess.run,
+                ) as planner_runs,
+                patch(
+                    "bdmv_emby_builder.planner._probe_playlist_video",
+                    return_value={"width": 1920, "height": 1080},
+                ),
+            ):
+                plan = make_plan(
+                    discs,
+                    source_root,
+                    root / "out",
+                    load_config(None),
+                    default_disc_type="movie",
+                )
+            self.assertFalse(
+                any(
+                    any(str(argument).startswith("bluray:") for argument in call.args[0])
+                    for call in planner_runs.call_args_list
+                )
+            )
+            self.assertEqual(
+                plan["jobs"][0]["mpls_path"], str(playlist_path.resolve())
+            )
+            self.assertEqual(
+                plan["jobs"][0]["items"][0]["source"], str(stream_path.resolve())
+            )
+            self.assertTrue(
+                any("fixed path spellings" in warning for warning in plan["warnings"])
+            )
+            validate_plan(plan)
+            with (
+                patch(
+                    "bdmv_emby_builder.builder._ffmpeg_protocols",
+                    return_value={"bluray"},
+                ),
+                self.assertRaisesRegex(RuntimeError, "canonical case"),
+            ):
+                _select_job_m2ts_backend(
+                    plan["jobs"][0], {"remux_backend": "auto"}, "ffmpeg"
+                )
+            with patch(
+                "bdmv_emby_builder.builder._ffmpeg_protocols",
+                return_value={"bluray"},
+            ):
+                self.assertEqual(
+                    _select_job_m2ts_backend(
+                        plan["jobs"][0],
+                        {"remux_backend": "concat"},
+                        "ffmpeg",
+                    ),
+                    "concat",
+                )
+
+    def test_case_colliding_required_bdmv_directories_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bdmv = root / "Disc" / "BDMV"
+            (bdmv / "PLAYLIST").mkdir(parents=True)
+            lower_playlist = bdmv / "playlist"
+            if lower_playlist.exists():
+                self.skipTest("filesystem does not permit case-distinct names")
+            lower_playlist.mkdir()
+            (bdmv / "STREAM").mkdir()
+            self.assertEqual(discover_bdmv(root), [])
+
+    def test_case_colliding_mpls_files_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bdmv = root / "Disc" / "BDMV"
+            playlist_dir = bdmv / "PLAYLIST"
+            stream_dir = bdmv / "STREAM"
+            playlist_dir.mkdir(parents=True)
+            stream_dir.mkdir()
+            lower = playlist_dir / "00000.mpls"
+            upper = playlist_dir / "00000.MPLS"
+            self._write_mpls(lower)
+            if upper.exists():
+                self.skipTest("filesystem does not permit case-distinct names")
+            self._write_mpls(upper)
+            (stream_dir / "00000.m2ts").touch()
+
+            discs = scan(root)
+            self.assertEqual(len(discs), 1)
+            self.assertEqual(discs[0].playlists, [])
+            self.assertIn(
+                "ambiguous case-insensitive playlist files",
+                discs[0].errors[0]["error"],
+            )
+
+            destination = root / "out"
+            job = {
+                "id": "ambiguous-mpls",
+                "disc": "Disc",
+                "playlist": "00000",
+                "relative_output": "Movie/movie.m2ts",
+                "output": str(destination / "Movie/movie.m2ts"),
+                "items": [
+                    {
+                        "source": str(stream_dir / "00000.m2ts"),
+                        "in_seconds": 0.0,
+                        "out_seconds": 10.0,
+                    }
+                ],
+                "missing_sources": [],
+                "duration_seconds": 10.0,
+                "bdmv_path": str(bdmv),
+                "mpls_path": str(lower),
+            }
+            plan = {
+                "schema_version": 7,
+                "source_root": str(root),
+                "destination_root": str(destination),
+                "settings": {},
+                "jobs": [job],
+            }
+            with self.assertRaisesRegex(
+                RuntimeError, "ambiguous case-insensitive child"
+            ):
+                validate_plan(plan)
+
+    def test_case_colliding_m2ts_files_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bdmv = root / "Disc" / "BDMV"
+            playlist_dir = bdmv / "PLAYLIST"
+            stream_dir = bdmv / "STREAM"
+            playlist_dir.mkdir(parents=True)
+            stream_dir.mkdir()
+            playlist = playlist_dir / "00000.mpls"
+            self._write_mpls(playlist)
+            lower = stream_dir / "00000.m2ts"
+            upper = stream_dir / "00000.M2TS"
+            lower.touch()
+            if upper.exists():
+                self.skipTest("filesystem does not permit case-distinct names")
+            upper.touch()
+
+            discs = scan(root)
+            self.assertEqual(len(discs), 1)
+            self.assertEqual(discs[0].playlists, [])
+            self.assertIn(
+                "ambiguous case-insensitive child",
+                discs[0].errors[0]["error"],
+            )
+
+            destination = root / "out"
+            job = {
+                "id": "ambiguous-m2ts",
+                "disc": "Disc",
+                "playlist": "00000",
+                "relative_output": "Movie/movie.m2ts",
+                "output": str(destination / "Movie/movie.m2ts"),
+                "items": [
+                    {
+                        "source": str(lower),
+                        "in_seconds": 0.0,
+                        "out_seconds": 10.0,
+                    }
+                ],
+                "missing_sources": [],
+                "duration_seconds": 10.0,
+                "bdmv_path": str(bdmv),
+                "mpls_path": str(playlist),
+            }
+            plan = {
+                "schema_version": 7,
+                "source_root": str(root),
+                "destination_root": str(destination),
+                "settings": {},
+                "jobs": [job],
+            }
+            with self.assertRaisesRegex(
+                RuntimeError, "ambiguous case-insensitive child"
+            ):
+                validate_plan(plan)
 
     def test_video_resolution_version(self) -> None:
         self.assertEqual(_video_version({"width": 1920, "height": 1080}), "1080p")
@@ -2740,7 +2960,7 @@ edition = "Director's Cut"
             nested_clip.parent.mkdir()
             nested_clip.touch()
             job["items"][0]["source"] = str(nested_clip)
-            with self.assertRaisesRegex(RuntimeError, "direct M2TS"):
+            with self.assertRaisesRegex(RuntimeError, "does not match MPLS clip"):
                 validate_plan(plan)
 
             job["items"][0]["source"] = str(canonical_clip)

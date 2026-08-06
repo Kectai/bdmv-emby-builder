@@ -76,6 +76,35 @@ def paths_may_alias(left: Path, right: Path) -> bool:
     return portable_path_key(resolved_left) == portable_path_key(resolved_right)
 
 
+def resolve_case_insensitive_child(parent: Path, expected_name: str) -> Path | None:
+    """Resolve one direct child without assuming filesystem case semantics.
+
+    Blu-ray directory and file names are conventionally uppercase, but real-world
+    extractions sometimes preserve lowercase or mixed-case variants.  Resolve the
+    native entry once and reject case/normalization collisions instead of choosing
+    an arbitrary alias on case-sensitive filesystems.
+    """
+    expected_key = _portable_part(expected_name)
+    try:
+        with os.scandir(parent) as entries:
+            matches = sorted(
+                (
+                    Path(entry.path)
+                    for entry in entries
+                    if _portable_part(entry.name) == expected_key
+                ),
+                key=lambda path: (path.name.casefold(), path.name),
+            )
+    except OSError:
+        return None
+    if len(matches) > 1:
+        names = ", ".join(path.name for path in matches)
+        raise ValueError(
+            f"ambiguous case-insensitive child {expected_name!r} in {parent}: {names}"
+        )
+    return matches[0] if matches else None
+
+
 def path_is_within(path: Path, root: Path) -> bool:
     """Prove native containment; never infer it from portable spelling alone."""
     resolved_path = resolve_path(path)

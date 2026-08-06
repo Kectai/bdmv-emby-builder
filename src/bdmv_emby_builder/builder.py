@@ -44,6 +44,7 @@ from .path_safety import (
     path_may_be_within,
     path_is_linklike,
     paths_equivalent,
+    resolve_case_insensitive_child,
 )
 
 TICKS_PER_SECOND = 45_000
@@ -1076,6 +1077,23 @@ def _is_within(path: Path, root: Path) -> bool:
     return path_is_within(path, root)
 
 
+def _case_insensitive_child_path(parent: Path, expected_name: str) -> Path:
+    try:
+        resolved = resolve_case_insensitive_child(parent, expected_name)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return resolved if resolved is not None else parent / expected_name
+
+
+def _required_bdmv_directory(bdmv_path: Path, expected_name: str) -> Path:
+    resolved = _case_insensitive_child_path(bdmv_path, expected_name)
+    if not resolved.is_dir():
+        raise RuntimeError(
+            f"bdmv_path is missing {expected_name} directory: {bdmv_path}"
+        )
+    return resolved
+
+
 def _validate_job_against_mpls(
     job: dict[str, Any],
     mpls_path: Path,
@@ -1111,6 +1129,13 @@ def _validate_job_against_mpls(
     segment_start = 0
     segment_end = len(playlist.items)
     chapter_range: tuple[int, int] | None = None
+    stream_dir = _required_bdmv_directory(mpls_path.parent.parent, "STREAM")
+    expected_sources = {
+        item.clip_id: _case_insensitive_child_path(
+            stream_dir, f"{item.clip_id}.m2ts"
+        )
+        for item in playlist.items
+    }
     segment = job.get("playlist_segment")
     if segment is not None:
         if not isinstance(segment, str):
@@ -1139,15 +1164,13 @@ def _validate_job_against_mpls(
             raise RuntimeError(
                 "derived episode inference exceeds the safe authored-boundary limit"
             )
-        stream_dir = mpls_path.parent.parent / "STREAM"
         if (
             any(item.is_multi_angle for item in playlist.items)
             or any(item.connection_condition == 6 for item in playlist.items[1:])
             or len({item.clip_id for item in playlist.items}) != len(playlist.items)
             or any(
-                path_is_linklike(stream_dir / f"{item.clip_id}.m2ts")
-                or not (stream_dir / f"{item.clip_id}.m2ts").is_file()
-                for item in playlist.items
+                path_is_linklike(source) or not source.is_file()
+                for source in expected_sources.values()
             )
             or (
                 playlist.subpath_count
@@ -1332,8 +1355,8 @@ def _validate_job_against_mpls(
                                     continue
                                 if len(candidate_playlist.items) == 1:
                                     candidate = candidate_playlist.items[0]
-                                    candidate_source = (
-                                        stream_dir / f"{candidate.clip_id}.m2ts"
+                                    candidate_source = _case_insensitive_child_path(
+                                        stream_dir, f"{candidate.clip_id}.m2ts"
                                     )
                                     if (
                                         path_is_linklike(candidate_source)
@@ -1433,7 +1456,9 @@ def _validate_job_against_mpls(
         if ffprobe is None:
             raise RuntimeError("ffprobe is required to validate playlist_segment sources")
         for parent_item in playlist.items:
-            parent_source = stream_dir / f"{parent_item.clip_id}.m2ts"
+            parent_source = _case_insensitive_child_path(
+                stream_dir, f"{parent_item.clip_id}.m2ts"
+            )
             try:
                 source_stat = parent_source.stat()
             except OSError as exc:
@@ -1498,7 +1523,8 @@ def _validate_job_against_mpls(
         raise RuntimeError("serialized PlayItems do not match the MPLS item count")
     for index, (item, expected) in enumerate(zip(items, expected_items), 1):
         source = Path(item["source"])
-        if source.name.casefold() != f"{expected.clip_id}.m2ts":
+        expected_source = expected_sources[expected.clip_id]
+        if not paths_equivalent(source, expected_source):
             raise RuntimeError(
                 f"PlayItem {index} source does not match MPLS clip {expected.clip_id}"
             )
@@ -1794,18 +1820,17 @@ def _validate_plan_paths(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> No
             )
         if bdmv_path.name.casefold() != "bdmv" or not bdmv_path.is_dir():
             raise RuntimeError(f"bdmv_path is not a BDMV directory: {bdmv_path}")
-        playlist_dir = bdmv_path / "PLAYLIST"
-        stream_dir = bdmv_path / "STREAM"
-        if not playlist_dir.is_dir() or not stream_dir.is_dir():
-            raise RuntimeError(
-                f"bdmv_path is missing PLAYLIST or STREAM: {bdmv_path}"
-            )
+        playlist_dir = _required_bdmv_directory(bdmv_path, "PLAYLIST")
+        stream_dir = _required_bdmv_directory(bdmv_path, "STREAM")
         if not paths_equivalent(mpls_path.parent, playlist_dir):
             raise RuntimeError(
                 f"mpls_path is not directly inside BDMV/PLAYLIST: {mpls_path}"
             )
         expected_playlist_name = f"{int(job['playlist']):05d}.mpls"
-        if mpls_path.name.casefold() != expected_playlist_name:
+        expected_mpls_path = _case_insensitive_child_path(
+            playlist_dir, expected_playlist_name
+        )
+        if not paths_equivalent(mpls_path, expected_mpls_path):
             raise RuntimeError(
                 f"mpls_path does not match playlist {job['playlist']}: {mpls_path}"
             )
@@ -2204,6 +2229,48 @@ def _select_m2ts_backend(settings: dict[str, Any], ffmpeg: str) -> str:
         "FFmpeg lacks the bluray protocol; install a libbluray-enabled build or explicitly "
         "set remux_backend=concat to accept the generic concat fallback"
     )
+
+
+def _libbluray_case_issue(job: dict[str, Any]) -> str | None:
+    """Return why libbluray cannot safely address this job on every platform."""
+    bdmv_path = Path(job["bdmv_path"])
+    mpls_path = Path(job["mpls_path"])
+    expected_playlist = f"{int(job['playlist']):05d}.mpls"
+    checks = [
+        (bdmv_path, "BDMV"),
+        (mpls_path.parent, "PLAYLIST"),
+        (mpls_path, expected_playlist),
+    ]
+    for item in job.get("items", []):
+        source = Path(item["source"])
+        clip_id = source.stem
+        checks.extend(
+            [
+                (source.parent, "STREAM"),
+                (source, f"{clip_id}.m2ts"),
+            ]
+        )
+    for path, expected_name in checks:
+        if path.name != expected_name:
+            return f"{path} must use the exact libbluray spelling {expected_name!r}"
+    return None
+
+
+def _select_job_m2ts_backend(
+    job: dict[str, Any], settings: dict[str, Any], ffmpeg: str
+) -> str:
+    configured = str(settings.get("remux_backend", "auto")).casefold()
+    if configured == "concat":
+        return _select_m2ts_backend(settings, ffmpeg)
+    case_issue = _libbluray_case_issue(job)
+    if case_issue is not None:
+        raise RuntimeError(
+            f"{job['relative_output']}: libbluray requires canonical case on "
+            f"case-sensitive filesystems ({case_issue}); use a case-normalized "
+            "read-only source copy or explicitly set remux_backend=concat when "
+            "the playlist does not require multi-angle or content-SubPath handling"
+        )
+    return _select_m2ts_backend(settings, ffmpeg)
 
 
 def _ensure_media_directory(path: Path) -> None:
@@ -2845,7 +2912,7 @@ def _execute_one_job(
         backend = (
             "concat"
             if _job_requires_concat_segment(job)
-            else _select_m2ts_backend(settings, ffmpeg)
+            else _select_job_m2ts_backend(job, settings, ffmpeg)
         )
     if _job_requires_playlist_remux(job) and backend != "bluray":
         raise RuntimeError(
@@ -3026,7 +3093,7 @@ def _execute_one_job(
                 backend = backend or (
                     "concat"
                     if _job_requires_concat_segment(job)
-                    else _select_m2ts_backend(settings, ffmpeg)
+                    else _select_job_m2ts_backend(job, settings, ffmpeg)
                 )
                 if _job_requires_playlist_remux(job) and backend != "bluray":
                     raise RuntimeError(

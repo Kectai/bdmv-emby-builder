@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from .path_safety import (
     path_is_linklike,
     path_is_within,
     read_bounded_regular_file,
+    resolve_case_insensitive_child,
 )
 
 MAX_BDMT_XML_BYTES = 8 * 1024 * 1024
@@ -28,10 +30,29 @@ class Disc:
     playlists: list[Playlist]
     errors: list[dict[str, str]]
     metadata_titles: dict[str, str] = field(default_factory=dict)
+    _stream_path_cache: dict[str, Path] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
-    @property
+    @cached_property
+    def playlist_dir(self) -> Path:
+        resolved = resolve_case_insensitive_child(self.bdmv_path, "PLAYLIST")
+        return resolved if resolved is not None else self.bdmv_path / "PLAYLIST"
+
+    @cached_property
     def stream_dir(self) -> Path:
-        return self.bdmv_path / "STREAM"
+        resolved = resolve_case_insensitive_child(self.bdmv_path, "STREAM")
+        return resolved if resolved is not None else self.bdmv_path / "STREAM"
+
+    def stream_path(self, clip_id: str) -> Path:
+        cached = self._stream_path_cache.get(clip_id)
+        if cached is not None:
+            return cached
+        expected_name = f"{clip_id}.m2ts"
+        resolved = resolve_case_insensitive_child(self.stream_dir, expected_name)
+        result = resolved if resolved is not None else self.stream_dir / expected_name
+        self._stream_path_cache[clip_id] = result
+        return result
 
     def canonical_playlists(self) -> list[Playlist]:
         groups: dict[tuple[Any, ...], list[Playlist]] = defaultdict(list)
@@ -44,8 +65,10 @@ class Disc:
         for playlist in self.playlists:
             signature_ids[playlist.semantic_signature].append(playlist.playlist_id)
         rows = []
-        for playlist in sorted(self.playlists, key=lambda x: (-x.duration_seconds, x.playlist_id)):
-            row = playlist.to_dict(self.stream_dir)
+        for playlist in sorted(
+            self.playlists, key=lambda x: (-x.duration_seconds, x.playlist_id)
+        ):
+            row = playlist.to_dict(self.stream_dir, self.stream_path)
             row["is_menu_loop"] = is_menu_loop(playlist)
             row["duplicate_playlists"] = sorted(
                 signature_ids[playlist.semantic_signature]
@@ -81,11 +104,43 @@ def read_metadata_titles(
     """Read localized disc titles from optional BDMV Disc Library metadata."""
     titles: dict[str, str] = {}
     allowed_root = (source_root or bdmv_path).resolve()
-    metadata_dir = bdmv_path / "META" / "DL"
-    if not metadata_dir.is_dir() or not path_is_within(metadata_dir, allowed_root):
+    try:
+        meta_dir = resolve_case_insensitive_child(bdmv_path, "META")
+        metadata_dir = (
+            resolve_case_insensitive_child(meta_dir, "DL")
+            if meta_dir is not None
+            else None
+        )
+    except ValueError:
         return titles
-    for path in sorted(metadata_dir.glob("bdmt_*.xml")):
-        language = path.stem.removeprefix("bdmt_").casefold()
+    if (
+        metadata_dir is None
+        or not metadata_dir.is_dir()
+        or not path_is_within(metadata_dir, allowed_root)
+    ):
+        return titles
+    try:
+        metadata_files = sorted(
+            (
+                path
+                for path in metadata_dir.iterdir()
+                if path.suffix.casefold() == ".xml"
+                and path.stem.casefold().startswith("bdmt_")
+            ),
+            key=_natural_path_key,
+        )
+    except OSError:
+        return titles
+    metadata_name_groups: dict[str, list[Path]] = defaultdict(list)
+    for path in metadata_files:
+        metadata_name_groups[path.name.casefold()].append(path)
+    unambiguous_metadata_files = [
+        paths[0] for paths in metadata_name_groups.values() if len(paths) == 1
+    ]
+    for path in unambiguous_metadata_files:
+        language = path.stem[len("bdmt_") :].casefold()
+        if not language:
+            continue
         try:
             if not path_is_within(path, allowed_root):
                 continue
@@ -93,7 +148,14 @@ def read_metadata_titles(
                 path, MAX_BDMT_XML_BYTES, "BDMT metadata"
             )
             root = ET.fromstring(data)
-            discinfo = next((node for node in root.iter() if _local_name(node.tag) == "discinfo"), None)
+            discinfo = next(
+                (
+                    node
+                    for node in root.iter()
+                    if _local_name(node.tag) == "discinfo"
+                ),
+                None,
+            )
             if discinfo is None:
                 continue
             title_node = next(
@@ -115,13 +177,20 @@ def discover_bdmv(source_root: Path) -> list[Path]:
     source_root = source_root.resolve()
 
     def is_safe_disc(path: Path) -> bool:
-        return (
+        try:
+            playlist_dir = resolve_case_insensitive_child(path, "PLAYLIST")
+            stream_dir = resolve_case_insensitive_child(path, "STREAM")
+        except ValueError:
+            return False
+        return bool(
             path.is_dir()
             and path_is_within(path, source_root)
-            and (path / "PLAYLIST").is_dir()
-            and path_is_within(path / "PLAYLIST", source_root)
-            and (path / "STREAM").is_dir()
-            and path_is_within(path / "STREAM", source_root)
+            and playlist_dir is not None
+            and playlist_dir.is_dir()
+            and path_is_within(playlist_dir, source_root)
+            and stream_dir is not None
+            and stream_dir.is_dir()
+            and path_is_within(stream_dir, source_root)
         )
 
     discovered: list[Path] = []
@@ -133,6 +202,9 @@ def discover_bdmv(source_root: Path) -> list[Path]:
                 children = sorted(entries, key=lambda entry: entry.name.casefold())
         except OSError:
             continue
+        bdmv_names = [
+            entry for entry in children if entry.name.casefold() == "bdmv"
+        ]
         for entry in children:
             candidate = Path(entry.path)
             if path_is_linklike(candidate):
@@ -143,7 +215,7 @@ def discover_bdmv(source_root: Path) -> list[Path]:
             except OSError:
                 continue
             if entry.name.casefold() == "bdmv":
-                if is_safe_disc(candidate):
+                if len(bdmv_names) == 1 and is_safe_disc(candidate):
                     discovered.append(candidate.resolve())
                 continue
             pending.append(candidate)
@@ -174,7 +246,42 @@ def scan(source_root: Path) -> list[Disc]:
             )
             discs.append(Disc(key, bdmv, playlists, errors, {}))
             continue
-        for path in sorted((bdmv / "PLAYLIST").glob("*.mpls")):
+        disc = Disc(key, bdmv, playlists, errors)
+        try:
+            playlist_paths = sorted(
+                (
+                    path
+                    for path in disc.playlist_dir.iterdir()
+                    if path.suffix.casefold() == ".mpls"
+                ),
+                key=_natural_path_key,
+            )
+        except (OSError, ValueError) as exc:
+            errors.append({"path": str(bdmv), "error": str(exc)})
+            playlist_paths = []
+        playlist_name_groups: dict[str, list[Path]] = defaultdict(list)
+        for path in playlist_paths:
+            playlist_name_groups[path.name.casefold()].append(path)
+        ambiguous_playlist_paths = {
+            path
+            for paths in playlist_name_groups.values()
+            if len(paths) > 1
+            for path in paths
+        }
+        for paths in playlist_name_groups.values():
+            if len(paths) > 1:
+                errors.append(
+                    {
+                        "path": str(disc.playlist_dir),
+                        "error": (
+                            "ambiguous case-insensitive playlist files: "
+                            + ", ".join(path.name for path in paths)
+                        ),
+                    }
+                )
+        for path in playlist_paths:
+            if path in ambiguous_playlist_paths:
+                continue
             try:
                 if not path_is_within(path, source_root):
                     raise ValueError("MPLS path escapes source_root")
@@ -183,7 +290,7 @@ def scan(source_root: Path) -> list[Disc]:
                     item.clip_id
                     for item in playlist.items
                     if not path_is_within(
-                        bdmv / "STREAM" / f"{item.clip_id}.m2ts", source_root
+                        disc.stream_path(item.clip_id), source_root
                     )
                 ]
                 if escaped_clips:
@@ -194,13 +301,6 @@ def scan(source_root: Path) -> list[Disc]:
                 playlists.append(playlist)
             except Exception as exc:
                 errors.append({"path": str(path), "error": str(exc)})
-        discs.append(
-            Disc(
-                key,
-                bdmv,
-                playlists,
-                errors,
-                read_metadata_titles(bdmv, source_root),
-            )
-        )
+        disc.metadata_titles = read_metadata_titles(bdmv, source_root)
+        discs.append(disc)
     return discs

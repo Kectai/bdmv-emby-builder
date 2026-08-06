@@ -962,7 +962,7 @@ def _item_covers_complete_clip(
     tolerance_seconds: float,
 ) -> bool:
     bounds = _probe_clip_bounds(
-        disc.stream_dir / f"{item.clip_id}.m2ts", ffprobe, cache
+        disc.stream_path(item.clip_id), ffprobe, cache
     )
     if bounds is None:
         return False
@@ -1528,12 +1528,41 @@ def _apply_extra_content_analysis(
     return summary
 
 
+def _libbluray_case_issue(disc: Disc) -> str | None:
+    """Return why this layout is not portable through libbluray's fixed names."""
+    try:
+        checks = [
+            (disc.bdmv_path, "BDMV"),
+            (disc.playlist_dir, "PLAYLIST"),
+            (disc.stream_dir, "STREAM"),
+        ]
+        for playlist in disc.playlists:
+            checks.append((playlist.path, f"{playlist.playlist_id}.mpls"))
+            for item in playlist.items:
+                checks.append(
+                    (disc.stream_path(item.clip_id), f"{item.clip_id}.m2ts")
+                )
+    except ValueError as exc:
+        return str(exc)
+    for path, expected_name in checks:
+        if path.name != expected_name:
+            return f"{path} must use the exact libbluray spelling {expected_name!r}"
+    return None
+
+
 def _bluray_url(disc: Disc) -> str:
     return f"bluray:{disc.bdmv_path.parent.as_posix()}"
 
 
 def _libbluray_main_playlist(disc: Disc, ffprobe: str) -> tuple[str | None, str | None]:
     """Ask FFmpeg's libbluray protocol which relevant playlist it selects by default."""
+    case_issue = _libbluray_case_issue(disc)
+    if case_issue is not None:
+        return (
+            None,
+            "libbluray was skipped because its fixed path spellings are not "
+            f"portable to this layout: {case_issue}",
+        )
     try:
         result = subprocess.run(
             [
@@ -1556,7 +1585,7 @@ def _libbluray_main_playlist(disc: Disc, ffprobe: str) -> tuple[str | None, str 
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)
-    match = re.search(r"selected\s+(\d{1,5})\.mpls", result.stderr)
+    match = re.search(r"selected\s+(\d{1,5})\.mpls", result.stderr, re.IGNORECASE)
     if match:
         return match.group(1).zfill(5), None
     detail = next((line.strip() for line in reversed(result.stderr.splitlines()) if line.strip()), "")
@@ -1584,7 +1613,7 @@ def _usable_candidates(disc: Disc) -> list[Playlist]:
         if playlist.items
         and not is_menu_loop(playlist)
         and all(
-            (disc.stream_dir / f"{item.clip_id}.m2ts").is_file()
+            disc.stream_path(item.clip_id).is_file()
             for item in playlist.items
         )
     }
@@ -1682,9 +1711,9 @@ def _main_playlist_choices(
                     f"{disc.key}: configured main playlist {requested} does not exist"
                 )
             missing_sources = [
-                disc.stream_dir / f"{item.clip_id}.m2ts"
+                disc.stream_path(item.clip_id)
                 for item in raw_playlist.items
-                if not (disc.stream_dir / f"{item.clip_id}.m2ts").is_file()
+                if not disc.stream_path(item.clip_id).is_file()
             ]
             detail = (
                 "missing source M2TS file(s): "
@@ -1721,9 +1750,9 @@ def _main_playlist_choices(
                 )
                 if selected_unusable is not None:
                     missing_sources = [
-                        disc.stream_dir / f"{item.clip_id}.m2ts"
+                        disc.stream_path(item.clip_id)
                         for item in selected_unusable.items
-                        if not (disc.stream_dir / f"{item.clip_id}.m2ts").is_file()
+                        if not disc.stream_path(item.clip_id).is_file()
                     ]
                     if missing_sources:
                         raise ValueError(
@@ -1922,7 +1951,7 @@ def _job(
     missing = []
     estimated_output_bytes = 0
     for item in playlist.items:
-        source = (disc.stream_dir / f"{item.clip_id}.m2ts").resolve()
+        source = disc.stream_path(item.clip_id).resolve()
         if not source.is_file():
             missing.append(str(source))
             source_size = 0
@@ -2047,7 +2076,7 @@ def make_plan(
             source_paths.extend(
                 (
                     f"playlist {playlist.playlist_id} M2TS {item.clip_id}",
-                    disc.stream_dir / f"{item.clip_id}.m2ts",
+                    disc.stream_path(item.clip_id),
                 )
                 for item in playlist.items
             )
@@ -2181,9 +2210,9 @@ def make_plan(
                 )
             elif playlist.items:
                 missing_sources = [
-                    str(disc.stream_dir / f"{item.clip_id}.m2ts")
+                    str(disc.stream_path(item.clip_id))
                     for item in playlist.items
-                    if not (disc.stream_dir / f"{item.clip_id}.m2ts").is_file()
+                    if not disc.stream_path(item.clip_id).is_file()
                 ]
                 if missing_sources:
                     missing_playlists.append(playlist)
@@ -2203,7 +2232,9 @@ def make_plan(
         all_candidates = [
             x
             for x in disc.playlists
-            if x.items and not is_menu_loop(x) and all((disc.stream_dir / f"{i.clip_id}.m2ts").is_file() for i in x.items)
+            if x.items
+            and not is_menu_loop(x)
+            and all(disc.stream_path(i.clip_id).is_file() for i in x.items)
         ]
         all_by_id = {x.playlist_id: x for x in all_candidates}
         candidates = _usable_candidates(disc)
