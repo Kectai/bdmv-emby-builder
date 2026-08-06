@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bdmv-emby-builder"
+version = "0.4.0b1"
+description = "Safely copy or losslessly remux BDMV playlists into an Emby M2TS library"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Video",
+]
+
+[project.scripts]
+bdmv-emby = "bdmv_emby.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Kectai/bdmv-emby-builder"
+Repository = "https://github.com/Kectai/bdmv-emby-builder"
+Issues = "https://github.com/Kectai/bdmv-emby-builder/issues"
+
+[tool.setuptools]
+packages = ["bdmv_emby"]

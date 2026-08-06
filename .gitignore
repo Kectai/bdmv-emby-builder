@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+/build/
+/dist/
+
+# JetBrains IDEs
+.idea/
+.fleet/
+*.iml
+*.ipr
+*.iws
+
+# Codex
+.codex/
+AGENTS.md
+AGENTS.override.md
+
+# Claude Code
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json
+
+# Other editors and macOS
+.DS_Store
+.vscode/
+
+# Generated local plans and build logs
+/scan.json
+/plan.json
+/build-results.json
+/dry-run-results.json
+/task*.toml
+/*-plan.json
+/*-results.json
+/config.current-library.*
+/config.full-library-*
+/full-library-*.json
+/examples/current-*.json
+/reference/bluray_m2ts_map.*
+/.test-tmp/
+/.test-artifacts/
+
+# Media outputs must never be committed
+*.m2ts
+*.mts
+*.mkv
+*.mp4
+*.partial.*
+.bdmv-emby-work/
+.bdmv-emby-state.json
+.bdmv-emby-build.lock

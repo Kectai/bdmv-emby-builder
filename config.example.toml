@@ -1,0 +1,55 @@
+# [task] 只描述本次任务从哪里读取、向哪里输出。
+[task]
+source = "/absolute/path/to/MOVIE_DISC"
+destination = "/absolute/path/to/EmbyMovies"
+
+# task.source 中只有一张盘（其下包含 BDMV）时可以省略 path。
+# movie 表示单部电影正片盘；series 表示剧集盘，两者都允许同时包含特典。
+[[disc]]
+disc_type = "movie"
+# processing = "copy_remux"
+
+# 每张盘可独立选择：
+# hardlink_only  = 只能一对一硬链接；任一内容不能链接就阻止整张盘。
+# hardlink_remux = 能硬链接则链接；完整单段无法链接时复制；其余无损重封装。
+# copy_remux     = 能直接复制则复制，其余无损重封装（默认）。
+
+# 可选：覆盖 BDMV META 标题，或把特典盘归入已有影片目录。
+# title = "Movie Name"
+# 同一 title、同一分辨率有多个剪辑时，用 edition 避免输出重名。
+# edition = "Director's Cut"
+
+# 如果 task.source 中包含多张类别不同的盘，再为每张盘增加 [[disc]]：
+#
+# [[disc]]
+# path = "Release/MAIN_DISC"
+# disc_type = "movie"
+# processing = "hardlink_remux"
+#
+# [[disc]]
+# path = "Release/BONUS_DISC"
+# disc_type = "bonus"
+# title = "Movie Name"
+# processing = "copy_remux"
+
+# 多张剧集盘使用相同的标准化 META 标题自动归组，并在同一季内跨盘连续编号。
+# Season 2、2nd Season、第2期、第2季、シーズン2 等明确季标会从 META 或路径读取；
+# 没有明确季标时默认第 1 季，并在计划中提醒人工确认：
+#
+# [[disc]]
+# path = "Series/Volume 1"
+# disc_type = "series"
+#
+# [[disc]]
+# path = "Series/Volume 2"
+# disc_type = "series"
+#
+# 自动标题无法归组时，为这些盘填写相同的 title。
+# 自动季号不正确时可填写 season；该盘不是从 E01 或上一盘之后开始时可填写 episode_start：
+#
+# [[disc]]
+# path = "Series/Season 2/Volume 1"
+# disc_type = "series"
+# title = "Series Name"
+# season = 2
+# episode_start = 13
