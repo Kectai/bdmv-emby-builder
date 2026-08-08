@@ -12,10 +12,10 @@
 python3 -m unittest discover -s tests -v
 ```
 
-当前共 156 项测试，覆盖：
+当前共 158 项测试，覆盖：
 
 - MPLS 长度、区段、PlayItem、Mark、连接条件、多角度、SubPath 和章节边界；
-- movie、series、bonus 规划，普通及带短边缘版权卡的非无缝单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、CLI/逐盘季号优先级、默认季号复核字段、集号及 edition 隔离；
+- movie、series、bonus 规划，普通及带短边缘版权卡的非无缝单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、CLI/逐盘季号优先级、默认季号复核字段、标题/季号/集号审计绑定、超长标题集号保留、集号及 edition 隔离；
 - 菜单循环、短交互导航、重复媒体和缺失 M2TS 的显式审计；
 - 低置信度短 extras 的全部音轨聚合、无音轨、正常音频短路、静态抽样证据和只提示不排除行为；
 - planner/builder 共用的完整分集证明、伪造时长提示/孤立 concat 拒绝及异常大边界数量保护；

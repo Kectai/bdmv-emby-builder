@@ -1427,6 +1427,90 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(filename.endswith(".m2ts"))
             validate_plan(plan)
 
+    def test_long_episode_filename_preserves_emby_numbering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "source"
+            root = source_root / "Release" / "Disc"
+            playlist = self._playlist(root, duration=24 * 60)
+            disc = Disc(
+                "Release/Disc",
+                root / "BDMV",
+                [playlist],
+                [],
+                {"eng": "A" * 300},
+            )
+            with (
+                patch(
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
+                    return_value=("00000", None),
+                ),
+                patch(
+                    "bdmv_emby_builder.planner._probe_playlist_video",
+                    return_value={"width": 1920, "height": 1080},
+                ),
+            ):
+                plan = make_plan(
+                    [disc],
+                    source_root,
+                    Path(tmp) / "out",
+                    load_config(None),
+                    default_disc_type="series",
+                    default_season_number=2,
+                )
+            job = plan["jobs"][0]
+            filename = Path(job["relative_output"]).name
+            self.assertIn(" - S02E01", filename)
+            self.assertLessEqual(len(filename.encode("utf-8")), 220)
+            self.assertLessEqual(len(filename.encode("utf-16-le")) // 2, 220)
+            validate_plan(plan)
+
+    def test_episode_audit_metadata_is_bound_to_output_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "source"
+            root = source_root / "Series" / "Disc"
+            playlist = self._playlist(root, duration=24 * 60)
+            disc = Disc(
+                "Series/Disc",
+                root / "BDMV",
+                [playlist],
+                [],
+                {"jpn": "作品"},
+            )
+            with (
+                patch(
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
+                    return_value=("00000", None),
+                ),
+                patch(
+                    "bdmv_emby_builder.planner._probe_playlist_video",
+                    return_value={"width": 1920, "height": 1080},
+                ),
+            ):
+                plan = make_plan(
+                    [disc],
+                    source_root,
+                    Path(tmp) / "out",
+                    load_config(None),
+                    default_disc_type="series",
+                    default_season_number=2,
+                )
+            validate_plan(plan)
+
+            mutations = (
+                ("library_title", "错误作品名", "library title"),
+                ("library_title_source", "forged_source", "title source"),
+                ("season_number", 99, "numbering does not match"),
+                ("episode_number", 99, "numbering does not match"),
+                ("season_source", "forged_source", "provenance"),
+                ("episode_number_source", "forged_source", "provenance"),
+            )
+            for field, value, message in mutations:
+                with self.subTest(field=field):
+                    changed = json.loads(json.dumps(plan))
+                    changed["jobs"][0][field] = value
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        validate_plan(changed)
+
     def test_disc_library_metadata_title_is_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bdmv = Path(tmp) / "BDMV"

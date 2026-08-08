@@ -68,6 +68,21 @@ PACKET_MAX_STREAM_EDGE_GAP_SECONDS = 2.0
 HASH_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_STATE_BYTES = 64 * 1024 * 1024
 SAFE_JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+LIBRARY_TITLE_SOURCE = re.compile(
+    r"(?:configured_(?:disc|cli_default|playlist)|directory_name|"
+    r"bdmt_[^/\\\x00-\x1f]{1,220}\.xml)"
+    r"(?:_volume_suffix_removed)?(?:_season_marker_removed)?"
+)
+SEASON_SOURCE = re.compile(
+    r"(?:configured|configured_cli_default|default_first_season|"
+    r"bdmt_[^/\\\x00-\x1f]{1,220}\.xml|"
+    r"directory_name:[^/\\\x00-\x1f]{1,220})"
+)
+EPISODE_NUMBER_SOURCES = {
+    "configured_episode_start",
+    "continued_within_title_and_season",
+    "first_disc_in_title_and_season",
+}
 StreamKey = tuple[
     str,
     str,
@@ -265,20 +280,31 @@ def _validate_plan_schema(plan: dict[str, Any]) -> None:
             raise RuntimeError(
                 f"plan job {identifier} has an invalid season review flag"
             )
-        if "library_title" in job or "library_title_source" in job:
+        has_library_audit = (
+            "library_title" in job or "library_title_source" in job
+        )
+        if has_library_audit:
             if not isinstance(job.get("library_title"), str) or not job["library_title"]:
                 raise RuntimeError(
                     f"plan job {identifier} has an invalid library title"
                 )
             if (
                 not isinstance(job.get("library_title_source"), str)
-                or not job["library_title_source"]
-                or len(job["library_title_source"]) > 256
+                or LIBRARY_TITLE_SOURCE.fullmatch(job["library_title_source"])
+                is None
             ):
                 raise RuntimeError(
                     f"plan job {identifier} has an invalid library title source"
                 )
-        if "season_confidence" in job or "needs_season_review" in job:
+            if job["library_title"] != relative_parts[0]:
+                raise RuntimeError(
+                    f"plan job {identifier} library title does not match "
+                    "relative_output"
+                )
+        has_season_audit = (
+            "season_confidence" in job or "needs_season_review" in job
+        )
+        if has_season_audit:
             expected_review = (
                 job.get("kind") == "episode"
                 and job.get("season_source") == "default_first_season"
@@ -296,6 +322,57 @@ def _validate_plan_schema(plan: dict[str, Any]) -> None:
             ):
                 raise RuntimeError(
                     f"plan job {identifier} has inconsistent season review metadata"
+                )
+            if job.get("kind") == "episode":
+                season_number = job.get("season_number")
+                episode_number = job.get("episode_number")
+                season_source = job.get("season_source")
+                episode_number_source = job.get("episode_number_source")
+                if (
+                    isinstance(season_number, bool)
+                    or not isinstance(season_number, int)
+                    or season_number < 0
+                    or isinstance(episode_number, bool)
+                    or not isinstance(episode_number, int)
+                    or episode_number < 1
+                ):
+                    raise RuntimeError(
+                        f"plan job {identifier} has invalid episode numbering"
+                    )
+                if (
+                    not isinstance(season_source, str)
+                    or SEASON_SOURCE.fullmatch(season_source) is None
+                    or episode_number_source not in EPISODE_NUMBER_SOURCES
+                    or (
+                        season_source == "default_first_season"
+                        and season_number != 1
+                    )
+                ):
+                    raise RuntimeError(
+                        f"plan job {identifier} has invalid episode provenance"
+                    )
+                expected_season_dir = f"Season {season_number:02d}"
+                episode_marker = f" - S{season_number:02d}E{episode_number:02d}"
+                if (
+                    len(relative_parts) != 3
+                    or relative_parts[1] != expected_season_dir
+                    or episode_marker not in Path(relative_parts[2]).stem
+                ):
+                    raise RuntimeError(
+                        f"plan job {identifier} episode numbering does not match "
+                        "relative_output"
+                    )
+            elif any(
+                job.get(field) is not None
+                for field in (
+                    "season_number",
+                    "season_source",
+                    "episode_number",
+                    "episode_number_source",
+                )
+            ):
+                raise RuntimeError(
+                    f"plan job {identifier} has episode metadata on a non-episode job"
                 )
         operation = job.get("operation", "auto")
         if operation not in {"auto", "copy", "remux_m2ts", "remux_mkv"}:

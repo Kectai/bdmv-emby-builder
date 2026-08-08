@@ -121,8 +121,8 @@ processing = "copy_remux"
 # 1. 环境检查
 bdmv-emby-builder doctor --config task.toml
 
-# 2. 生成可审核计划；不写媒体。多盘续作可用 --season 统一指定季号
-bdmv-emby-builder plan --config task.toml --season 2 --out plan.json
+# 2. 生成可审核计划；不写媒体
+bdmv-emby-builder plan --config task.toml --out plan.json
 
 # 3. dry-run；解析最终 copy / hardlink / remux 动作
 bdmv-emby-builder build plan.json --results dry-run-results.json
@@ -336,7 +336,7 @@ TOML、scan、plan、results 和 state 通常包含绝对路径、目录名和�
 python3 -m unittest discover -s tests -v
 ```
 
-当前 156 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、带短边缘版权卡且无 Entry Mark 的非无缝单 PlayItem 分集、普通单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、CLI 季号默认值与逐盘覆盖、逐盘/CLI/原盘标题优先级、多作品任务的标题隔离、发行目录标题清洗、大小写混合的 BDMV 结构及碰撞拒绝、跨平台路径、链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
+当前 158 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、带短边缘版权卡且无 Entry Mark 的非无缝单 PlayItem 分集、普通单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、CLI 季号默认值与逐盘覆盖、逐盘/CLI/原盘标题优先级、多作品任务的标题隔离、标题/季号/集号审计绑定、超长剧集标题中的 Emby 集号保留、发行目录标题清洗、大小写混合的 BDMV 结构及碰撞拒绝、跨平台路径、链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
 
 真实数据验证覆盖多张 BDMV、电影主盘、纯特典盘、多盘剧集、一集一个 M2TS、一集跨多个 M2TS、1080p/4K、多段 seamless branching 正片及直接复制/硬链接/重封装。记录见[验证报告](examples/VALIDATION.md)。
 

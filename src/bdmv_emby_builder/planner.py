@@ -557,6 +557,61 @@ def _safe_filename(stem: str, suffix: str) -> str:
     return f"{''.join(prefix).rstrip(' .')}{marker}{suffix}"
 
 
+def _safe_filename_preserving_tail(prefix: str, tail: str, suffix: str) -> str:
+    """Keep an Emby identity suffix when a long title must be shortened."""
+    safe_prefix = _safe_component(prefix)
+    candidate = f"{safe_prefix}{tail}{suffix}"
+    if (
+        len(candidate.encode("utf-8")) <= MAX_COMPONENT_UTF8_BYTES
+        and len(candidate.encode("utf-16-le")) // 2
+        <= MAX_COMPONENT_UTF16_UNITS
+    ):
+        return candidate
+
+    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:10]
+    marker = f"~{digest}"
+
+    def truncate(value: str, utf8_budget: int, utf16_budget: int) -> str:
+        result: list[str] = []
+        utf8_size = 0
+        utf16_size = 0
+        for character in value:
+            character_utf8 = len(character.encode("utf-8"))
+            character_utf16 = len(character.encode("utf-16-le")) // 2
+            if (
+                utf8_size + character_utf8 > utf8_budget
+                or utf16_size + character_utf16 > utf16_budget
+            ):
+                break
+            result.append(character)
+            utf8_size += character_utf8
+            utf16_size += character_utf16
+        return "".join(result).rstrip(" .")
+
+    preserved_tail = f"{marker}{tail}{suffix}"
+    if (
+        len(preserved_tail.encode("utf-8")) > MAX_COMPONENT_UTF8_BYTES
+        or len(preserved_tail.encode("utf-16-le")) // 2
+        > MAX_COMPONENT_UTF16_UNITS
+    ):
+        tail = truncate(
+            tail,
+            MAX_COMPONENT_UTF8_BYTES
+            - len((marker + suffix).encode("utf-8")),
+            MAX_COMPONENT_UTF16_UNITS
+            - len((marker + suffix).encode("utf-16-le")) // 2,
+        )
+        preserved_tail = f"{marker}{tail}{suffix}"
+
+    shortened_prefix = truncate(
+        safe_prefix,
+        MAX_COMPONENT_UTF8_BYTES - len(preserved_tail.encode("utf-8")),
+        MAX_COMPONENT_UTF16_UNITS
+        - len(preserved_tail.encode("utf-16-le")) // 2,
+    )
+    return f"{shortened_prefix}{preserved_tail}"
+
+
 def _fallback_movie_name(disc_key: str) -> str:
     first = Path(disc_key).parts[0] if Path(disc_key).parts else disc_key
     name = first
@@ -1933,15 +1988,17 @@ def _job(
     elif kind == "episode":
         if season_number is None or episode_number is None:
             raise ValueError("episode jobs require season and episode numbers")
-        stem = (
-            f"{movie_dir} - S{season_number:02d}E{episode_number:02d}"
+        identity_tail = (
+            f" - S{season_number:02d}E{episode_number:02d}"
             + (f" - {_safe_component(version)}" if version else "")
             + (f" - {_safe_component(edition)}" if edition else "")
         )
         relative = (
             PurePosixPath(movie_dir)
             / f"Season {season_number:02d}"
-            / _safe_filename(stem, f".{container}")
+            / _safe_filename_preserving_tail(
+                movie_dir, identity_tail, f".{container}"
+            )
         )
         confidence = "high" if selection_method == "episode_playitem_split" else "medium"
     else:
