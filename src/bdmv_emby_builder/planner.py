@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tomllib
 import unicodedata
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -632,6 +633,21 @@ def _series_title(disc: Disc) -> tuple[str, str]:
     if normalized and normalized != title:
         return normalized, "_".join((source, *suffixes))
     return title, source
+
+
+def _library_title(
+    disc: Disc,
+    rule: dict[str, Any],
+    disc_type: str,
+    *,
+    cli_title: str | None,
+) -> tuple[str, str]:
+    """Resolve the Emby library directory and retain auditable precedence."""
+    if "library_dir" in rule:
+        return str(rule["library_dir"]), "configured_disc"
+    if cli_title is not None:
+        return cli_title, "configured_cli_default"
+    return _series_title(disc) if disc_type == "series" else _disc_title(disc)
 
 
 def _extract_season_marker(value: str) -> int | None:
@@ -1887,12 +1903,15 @@ def _job(
     processing: str = DEFAULT_PROCESSING,
     disc_title: str,
     disc_title_source: str,
+    library_title_source: str,
     output_name: str | None = None,
     extras_folder: str | None = None,
     source_playlist: str | None = None,
     playlist_start_seconds: float = 0.0,
     season_number: int | None = None,
     season_source: str | None = None,
+    season_confidence: str | None = None,
+    needs_season_review: bool = False,
     episode_number: int | None = None,
     episode_number_source: str | None = None,
     episode_duration_hint_seconds: float | None = None,
@@ -1993,6 +2012,8 @@ def _job(
         "disc": disc.key,
         "disc_title": disc_title,
         "disc_title_source": disc_title_source,
+        "library_title": movie_dir,
+        "library_title_source": library_title_source,
         "metadata_titles": disc.metadata_titles,
         "bdmv_path": str(disc.bdmv_path.resolve()),
         "disc_type": disc_type,
@@ -2007,6 +2028,8 @@ def _job(
         "kind": kind,
         "season_number": season_number,
         "season_source": season_source,
+        "season_confidence": season_confidence,
+        "needs_season_review": needs_season_review,
         "episode_number": episode_number,
         "episode_number_source": episode_number_source,
         "episode_duration_hint_seconds": episode_duration_hint_seconds,
@@ -2040,6 +2063,7 @@ def make_plan(
     *,
     default_disc_type: str | None = None,
     default_title: str | None = None,
+    default_season_number: int | None = None,
     default_processing: str = DEFAULT_PROCESSING,
 ) -> dict[str, Any]:
     settings = config["defaults"]
@@ -2088,6 +2112,12 @@ def make_plan(
     settings["container"] = container
     if default_disc_type not in {None, "movie", "series", "bonus", "ignore"}:
         raise ValueError(f"invalid default disc type: {default_disc_type!r}")
+    if default_season_number is not None and (
+        isinstance(default_season_number, bool)
+        or not isinstance(default_season_number, int)
+        or default_season_number < 0
+    ):
+        raise ValueError("default season number must be an integer >= 0")
     if default_processing not in PROCESSING_MODES:
         raise ValueError(f"invalid default processing mode: {default_processing!r}")
     ffprobe = _resolve_ffprobe(settings)
@@ -2142,10 +2172,13 @@ def make_plan(
         )
         if profile_main is None:
             continue
-        profile_title = _series_title(profile_disc)[0]
-        profile_library = profile_rule.get(
-            "library_dir", default_title or profile_title
+        profile_library = _library_title(
+            profile_disc,
+            profile_rule,
+            "series",
+            cli_title=default_title,
         )
+        profile_library = profile_library[0]
         profile_key = (
             unicodedata.normalize(
                 "NFC", _safe_component(str(profile_library))
@@ -2236,8 +2269,12 @@ def make_plan(
         all_by_id = {x.playlist_id: x for x in all_candidates}
         candidates = _usable_candidates(disc)
         disc_title, disc_title_source = _disc_title(disc)
-        automatic_title = _series_title(disc)[0] if disc_type == "series" else disc_title
-        library_dir = rule.get("library_dir", default_title or automatic_title)
+        library_dir, library_title_source = _library_title(
+            disc,
+            rule,
+            disc_type,
+            cli_title=default_title,
+        )
         if disc.errors:
             warnings.append(f"{disc.key}: {len(disc.errors)} playlist(s) could not be parsed")
         if processing == "hardlink_only" and (missing_playlists or disc.errors):
@@ -2289,6 +2326,11 @@ def make_plan(
                         processing=processing,
                         disc_title=disc_title,
                         disc_title_source=disc_title_source,
+                        library_title_source=(
+                            "configured_playlist"
+                            if "library_dir" in route
+                            else library_title_source
+                        ),
                         output_name=route.get("output_name"),
                         extras_folder=route.get("extras_folder", rule.get("extras_folder")),
                     )
@@ -2352,9 +2394,18 @@ def make_plan(
                 if configured_season is not None:
                     season_number = configured_season
                     season_source = "configured"
+                    season_confidence = "high"
+                    needs_season_review = False
+                elif default_season_number is not None:
+                    season_number = default_season_number
+                    season_source = "configured_cli_default"
+                    season_confidence = "high"
+                    needs_season_review = False
                 elif inferred_season is not None:
                     season_number = inferred_season
                     season_source = inferred_season_source
+                    season_confidence = "high"
+                    needs_season_review = False
                     if season_conflicts:
                         conflict_text = ", ".join(
                             f"season {number} from {source}"
@@ -2368,6 +2419,8 @@ def make_plan(
                 else:
                     season_number = DEFAULT_SEASON_NUMBER
                     season_source = "default_first_season"
+                    season_confidence = "low"
+                    needs_season_review = True
 
                 normalized_library = unicodedata.normalize(
                     "NFC", _safe_component(str(library_dir))
@@ -2387,7 +2440,7 @@ def make_plan(
                     warnings.append(
                         f"{library_dir}: no explicit season marker found; "
                         f"defaulted to season {DEFAULT_SEASON_NUMBER}. Configure "
-                        "[[disc]].season when this is not the first season"
+                        "--season or [[disc]].season when this is not the first season"
                     )
                     default_season_warned.add(normalized_library)
 
@@ -2527,6 +2580,7 @@ def make_plan(
                             processing=processing,
                             disc_title=disc_title,
                             disc_title_source=disc_title_source,
+                            library_title_source=library_title_source,
                             source_playlist=(
                                 main.playlist_id
                                 if episode_selection
@@ -2540,6 +2594,8 @@ def make_plan(
                             playlist_start_seconds=playlist_start,
                             season_number=season_number,
                             season_source=season_source,
+                            season_confidence=season_confidence,
+                            needs_season_review=needs_season_review,
                             episode_number=next_episode + offset,
                             episode_number_source=episode_number_source,
                             episode_duration_hint_seconds=episode_duration_hint,
@@ -2653,6 +2709,7 @@ def make_plan(
                                 processing=processing,
                                 disc_title=disc_title,
                                 disc_title_source=disc_title_source,
+                                library_title_source=library_title_source,
                                 edition=rule.get("edition"),
                                 extras_folder=rule.get("extras_folder"),
                                 source_playlist=playlist.playlist_id,
@@ -2700,6 +2757,7 @@ def make_plan(
                     processing=processing,
                     disc_title=disc_title,
                     disc_title_source=disc_title_source,
+                    library_title_source=library_title_source,
                     output_name=rule.get("output_name") if kind == "main" else None,
                     edition=rule.get("edition") if kind == "extras" else main_edition,
                     extras_folder=rule.get("extras_folder"),
@@ -2789,6 +2847,7 @@ def make_plan(
         "cli_defaults": {
             "disc_type": default_disc_type,
             "title": default_title,
+            "season": default_season_number,
             "processing": default_processing,
         },
         "summary": {
@@ -2824,6 +2883,21 @@ def make_plan(
         "disc_blockers": disc_blockers,
         "recognition": {
             "main_selection_counts": selection_counts,
+            "season_source_counts": dict(
+                Counter(
+                    str(job["season_source"])
+                    for job in jobs
+                    if job["kind"] == "episode"
+                )
+            ),
+            "title_source_counts": dict(
+                Counter(str(job["library_title_source"]) for job in jobs)
+            ),
+            "season_review_count": sum(
+                bool(job.get("needs_season_review"))
+                for job in jobs
+                if job["kind"] == "episode"
+            ),
             "extras_content_analysis": extras_content_analysis,
         },
     }

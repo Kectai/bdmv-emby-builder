@@ -1108,9 +1108,82 @@ class CoreTests(unittest.TestCase):
                 )
             job = plan["jobs"][0]
             self.assertEqual(job["disc_title"], "日本語名")
+            self.assertEqual(job["library_title"], "日本語名")
+            self.assertEqual(job["library_title_source"], "bdmt_jpn.xml")
             self.assertEqual(job["playlist_selection"], "ffmpeg_libbluray_relevant_longest")
             self.assertEqual(job["version"], "4K")
             self.assertEqual(job["relative_output"], "日本語名/日本語名 - 4K.m2ts")
+
+    def test_library_title_precedence_is_disc_then_cli_then_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            disc_root = source_root / "Disc"
+            playlist = self._playlist(disc_root)
+            disc = Disc(
+                "Disc",
+                disc_root / "BDMV",
+                [playlist],
+                [],
+                {"jpn": "原盘标题"},
+            )
+            cases = (
+                (
+                    {"library_dir": "逐盘标题"},
+                    "命令行标题",
+                    "逐盘标题",
+                    "configured_disc",
+                ),
+                (
+                    {},
+                    "命令行标题",
+                    "命令行标题",
+                    "configured_cli_default",
+                ),
+                ({}, None, "原盘标题", "bdmt_jpn.xml"),
+            )
+            with (
+                patch(
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
+                    return_value=("00000", None),
+                ),
+                patch(
+                    "bdmv_emby_builder.planner._probe_playlist_video",
+                    return_value={"width": 1920, "height": 1080},
+                ),
+            ):
+                for index, (
+                    rule_values,
+                    cli_title,
+                    expected_title,
+                    expected_source,
+                ) in enumerate(cases):
+                    with self.subTest(expected_source=expected_source):
+                        config = load_config(None)
+                        config["discs"] = [
+                            {
+                                "match": "Disc",
+                                "disc_type": "movie",
+                                **rule_values,
+                            }
+                        ]
+                        plan = make_plan(
+                            [disc],
+                            source_root,
+                            root / f"out-{index}",
+                            config,
+                            default_title=cli_title,
+                        )
+                        job = plan["jobs"][0]
+                        self.assertEqual(job["library_title"], expected_title)
+                        self.assertEqual(job["library_title_source"], expected_source)
+                        self.assertEqual(
+                            Path(job["relative_output"]).parts[0], expected_title
+                        )
+                        self.assertEqual(
+                            plan["recognition"]["title_source_counts"],
+                            {expected_source: 1},
+                        )
 
     def test_directory_title_removes_generic_leading_release_tags(self) -> None:
         disc = Disc(
@@ -2135,6 +2208,15 @@ edition = "Director's Cut"
             self.assertTrue(
                 all(job["season_source"] == "default_first_season" for job in plan["jobs"])
             )
+            self.assertTrue(
+                all(job["season_confidence"] == "low" for job in plan["jobs"])
+            )
+            self.assertTrue(all(job["needs_season_review"] for job in plan["jobs"]))
+            self.assertEqual(
+                plan["recognition"]["season_source_counts"],
+                {"default_first_season": 4},
+            )
+            self.assertEqual(plan["recognition"]["season_review_count"], 4)
             self.assertEqual(
                 sum("no explicit season marker" in warning for warning in plan["warnings"]),
                 1,
@@ -2185,6 +2267,10 @@ edition = "Director's Cut"
             self.assertTrue(
                 all(job["season_source"] == "bdmt_jpn.xml" for job in plan["jobs"])
             )
+            self.assertTrue(
+                all(job["season_confidence"] == "high" for job in plan["jobs"])
+            )
+            self.assertFalse(any(job["needs_season_review"] for job in plan["jobs"]))
             self.assertEqual(
                 [job["episode_number_source"] for job in plan["jobs"]],
                 [
@@ -2351,12 +2437,78 @@ edition = "Director's Cut"
             job = plan["jobs"][0]
             self.assertEqual(job["season_number"], 3)
             self.assertEqual(job["season_source"], "configured")
+            self.assertEqual(job["season_confidence"], "high")
+            self.assertFalse(job["needs_season_review"])
             self.assertEqual(job["episode_number"], 7)
             self.assertEqual(job["episode_number_source"], "configured_episode_start")
             self.assertEqual(
                 job["relative_output"],
                 "作品/Season 03/作品 - S03E07 - 1080p.m2ts",
             )
+
+    def test_cli_default_season_is_overridden_by_per_disc_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "source"
+            discs = []
+            for volume in (1, 2):
+                root = source_root / "作品" / f"Volume {volume}"
+                playlist = self._playlist(root, duration=24 * 60)
+                discs.append(
+                    Disc(
+                        f"作品/Volume {volume}",
+                        root / "BDMV",
+                        [playlist],
+                        [],
+                        {"jpn": f"作品 第2期 第{volume}巻"},
+                    )
+                )
+            config = load_config(None)
+            config["discs"] = [
+                {"match": discs[0].key, "disc_type": "series"},
+                {
+                    "match": discs[1].key,
+                    "disc_type": "series",
+                    "season_number": 3,
+                },
+            ]
+            with (
+                patch(
+                    "bdmv_emby_builder.planner._libbluray_main_playlist",
+                    return_value=("00000", None),
+                ),
+                patch(
+                    "bdmv_emby_builder.planner._probe_playlist_video",
+                    return_value={"width": 1920, "height": 1080},
+                ),
+            ):
+                plan = make_plan(
+                    discs,
+                    source_root,
+                    Path(tmp) / "out",
+                    config,
+                    default_season_number=4,
+                )
+            self.assertEqual(
+                [job["season_number"] for job in plan["jobs"]], [4, 3]
+            )
+            self.assertEqual(
+                [job["season_source"] for job in plan["jobs"]],
+                ["configured_cli_default", "configured"],
+            )
+            self.assertTrue(
+                all(job["season_confidence"] == "high" for job in plan["jobs"])
+            )
+            self.assertFalse(any(job["needs_season_review"] for job in plan["jobs"]))
+            self.assertEqual(plan["cli_defaults"]["season"], 4)
+
+            with self.assertRaisesRegex(ValueError, "default season"):
+                make_plan(
+                    discs,
+                    source_root,
+                    Path(tmp) / "out",
+                    config,
+                    default_season_number=-1,
+                )
 
     def test_metadata_season_wins_over_conflicting_directory_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2777,6 +2929,13 @@ edition = "Director's Cut"
             with self.assertRaisesRegex(ValueError, "unknown field"):
                 load_config(path)
 
+    def test_toml_rejects_task_title_to_preserve_multi_series_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "library.toml"
+            path.write_text('[task]\ntitle = "Global Title"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown TOML task field"):
+                load_config(path)
+
     def test_toml_config_rejects_invalid_setting_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "library.toml"
@@ -2935,12 +3094,24 @@ edition = "Director's Cut"
                 encoding="utf-8",
             )
             self.assertEqual(
-                cli_main(["plan", "--config", str(config), "--out", str(plan_path)]), 0
+                cli_main(
+                    [
+                        "plan",
+                        "--config",
+                        str(config),
+                        "--season",
+                        "2",
+                        "--out",
+                        str(plan_path),
+                    ]
+                ),
+                0,
             )
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             self.assertEqual(plan["source_root"], str(source.resolve()))
             self.assertEqual(plan["destination_root"], str(destination.resolve()))
             self.assertEqual(plan["cli_defaults"]["disc_type"], None)
+            self.assertEqual(plan["cli_defaults"]["season"], 2)
 
     def test_single_playitem_copy_requires_complete_source_range(self) -> None:
         job = {

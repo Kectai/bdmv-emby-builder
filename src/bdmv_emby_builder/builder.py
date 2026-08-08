@@ -255,6 +255,48 @@ def _validate_plan_schema(plan: dict[str, Any]) -> None:
                 f"plan job {identifier} has an unsupported processing mode: "
                 f"{processing!r}"
             )
+        season_confidence = job.get("season_confidence")
+        needs_season_review = job.get("needs_season_review", False)
+        if season_confidence not in {None, "low", "high"}:
+            raise RuntimeError(
+                f"plan job {identifier} has an invalid season confidence"
+            )
+        if not isinstance(needs_season_review, bool):
+            raise RuntimeError(
+                f"plan job {identifier} has an invalid season review flag"
+            )
+        if "library_title" in job or "library_title_source" in job:
+            if not isinstance(job.get("library_title"), str) or not job["library_title"]:
+                raise RuntimeError(
+                    f"plan job {identifier} has an invalid library title"
+                )
+            if (
+                not isinstance(job.get("library_title_source"), str)
+                or not job["library_title_source"]
+                or len(job["library_title_source"]) > 256
+            ):
+                raise RuntimeError(
+                    f"plan job {identifier} has an invalid library title source"
+                )
+        if "season_confidence" in job or "needs_season_review" in job:
+            expected_review = (
+                job.get("kind") == "episode"
+                and job.get("season_source") == "default_first_season"
+            )
+            expected_confidence = (
+                "low"
+                if expected_review
+                else "high"
+                if job.get("kind") == "episode"
+                else None
+            )
+            if (
+                needs_season_review != expected_review
+                or season_confidence != expected_confidence
+            ):
+                raise RuntimeError(
+                    f"plan job {identifier} has inconsistent season review metadata"
+                )
         operation = job.get("operation", "auto")
         if operation not in {"auto", "copy", "remux_m2ts", "remux_mkv"}:
             raise RuntimeError(
@@ -2796,9 +2838,13 @@ def _result_record(
         "schema_version": BUILD_RESULTS_SCHEMA_VERSION,
         "id": job["id"],
         "disc": job["disc"],
+        "library_title": job.get("library_title"),
+        "library_title_source": job.get("library_title_source"),
         "kind": job.get("kind"),
         "season_number": job.get("season_number"),
         "season_source": job.get("season_source"),
+        "season_confidence": job.get("season_confidence"),
+        "needs_season_review": job.get("needs_season_review", False),
         "episode_number": job.get("episode_number"),
         "episode_number_source": job.get("episode_number_source"),
         "processing": job.get("processing", "copy_remux"),
@@ -2865,6 +2911,8 @@ def _state_entry(
         "hardlink_verified": hardlink_verified,
         "remux_backend": backend,
         "disc_type": job.get("disc_type"),
+        "library_title": job.get("library_title"),
+        "library_title_source": job.get("library_title_source"),
         "kind": job.get("kind"),
         "playlist": job["playlist"],
         "playlist_segment": job.get("playlist_segment"),
@@ -2872,6 +2920,8 @@ def _state_entry(
         "mpls_path": job["mpls_path"],
         "season_number": job.get("season_number"),
         "season_source": job.get("season_source"),
+        "season_confidence": job.get("season_confidence"),
+        "needs_season_review": job.get("needs_season_review", False),
         "episode_number": job.get("episode_number"),
         "episode_number_source": job.get("episode_number_source"),
         "sources": [item["source"] for item in job["items"]],

@@ -121,8 +121,8 @@ processing = "copy_remux"
 # 1. 环境检查
 bdmv-emby-builder doctor --config task.toml
 
-# 2. 生成可审核计划；不写媒体
-bdmv-emby-builder plan --config task.toml --out plan.json
+# 2. 生成可审核计划；不写媒体。多盘续作可用 --season 统一指定季号
+bdmv-emby-builder plan --config task.toml --season 2 --out plan.json
 
 # 3. dry-run；解析最终 copy / hardlink / remux 动作
 bdmv-emby-builder build plan.json --results dry-run-results.json
@@ -149,7 +149,7 @@ bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 
 ## 配置
 
-每个 TOML 文件描述一次任务。`[task]` 只放任务级输入输出；`[[disc]]` 只放每张盘需要人工表达的类别、归属和处理策略。
+每个 TOML 文件描述一次任务。`[task]` 只放任务级输入输出；`[[disc]]` 只放每张盘需要人工表达的类别、归属和处理策略，因此一个任务可以同时处理多个不同作品。
 
 ### `[task]`
 
@@ -174,7 +174,9 @@ bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 
 配置不接受 playlist ID、单个花絮路由或输出文件名。技术细节由程序规划，用户在 Emby 派生目录中复核后可自行更名和移动。
 
-季号按“用户配置 > META 明确季标 > 目录明确季标 > 默认第 1 季”确定。自动识别只接受 `Season 2`、`2nd Season`、`第2期`、`第2季`、`シーズン2` 等明确形式；缺少证据时会警告。相同作品、相同季和相同 edition 的多张盘跨盘连续编号；不同季或 edition 各自从 `E01` 开始，组内集号范围重叠会在规划阶段失败。
+作品目录名按“逐盘 `[[disc]].title` > 命令行 `--title` > 原盘 META 日文标题 > META 英文/其他标题 > 原盘目录名”取得。一个任务包含多个作品时，应在相关 `[[disc]]` 中分别填写相应的 `title`；`--title` 仅适合整个输入都属于同一作品。计划中的 `library_title` 和 `library_title_source` 会保留最终值及来源，顶层 `recognition.title_source_counts` 汇总来源；没有配置时不会查询网络或用 TMDB 标题替换原盘名称。
+
+季号按“逐盘 `season` > 命令行 `--season` > META 明确季标 > 目录明确季标 > 默认第 1 季”确定；`--season 0` 表示 Specials。自动识别只接受 `Season 2`、`2nd Season`、`第2期`、`第2季`、`シーズン2` 等明确形式。缺少证据时不阻止规划或构建，仍输出 Season 1，但 job 会记录 `season_confidence = "low"`、`needs_season_review = true`，顶层 `recognition.season_review_count` 汇总待复核数量；显式配置或明确季标记录高置信度。相同作品、相同季和相同 edition 的多张盘跨盘连续编号；不同季或 edition 各自从 `E01` 开始，组内集号范围重叠会在规划阶段失败。
 
 剧集自动拆分优先使用原盘明确的播放关系。若一个 episode 对应一个完整 PlayItem，则直接拆分；起点 Entry Mark 或 `connection_condition=1` 的非无缝连接都可作为独立硬边界。对于完整、唯一且时长一致的单集 PlayItem，主 Play-All 每端至多一个、两端累计不超过 30 秒且同样具有硬边界的片段可作为版权卡或片头标识排除，并在计划中明确记录时长警告。若一个 episode 横跨多个完整 PlayItem，则只在非无缝 Entry Mark 边界成立，并且同作品中其他明确分集提供了稳定时长轮廓，或本盘存在重复的片尾到片头重置结构时才分组。一条完整 M2TS 也可能收录两集或多集：程序先寻找能连续覆盖主标题的独立单集 playlist；没有这种旁证时，才在时长轮廓或重复章节节奏足够明确时按 Entry Mark 章节切分。以上推断都会生成警告并要求审核。
 
@@ -334,7 +336,7 @@ TOML、scan、plan、results 和 state 通常包含绝对路径、目录名和�
 python3 -m unittest discover -s tests -v
 ```
 
-当前 153 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、带短边缘版权卡且无 Entry Mark 的非无缝单 PlayItem 分集、普通单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、发行目录标题清洗、大小写混合的 BDMV 结构及碰撞拒绝、跨平台路径、链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
+当前 156 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、带短边缘版权卡且无 Entry Mark 的非无缝单 PlayItem 分集、普通单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、CLI 季号默认值与逐盘覆盖、逐盘/CLI/原盘标题优先级、多作品任务的标题隔离、发行目录标题清洗、大小写混合的 BDMV 结构及碰撞拒绝、跨平台路径、链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
 
 真实数据验证覆盖多张 BDMV、电影主盘、纯特典盘、多盘剧集、一集一个 M2TS、一集跨多个 M2TS、1080p/4K、多段 seamless branching 正片及直接复制/硬链接/重封装。记录见[验证报告](examples/VALIDATION.md)。
 

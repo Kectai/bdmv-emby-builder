@@ -191,6 +191,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Emby movie or series title; defaults to normalized BDMV metadata",
     )
     plan_cmd.add_argument(
+        "--season",
+        type=int,
+        help=(
+            "default season number for series discs; per-disc TOML overrides it, "
+            "and 0 means Specials"
+        ),
+    )
+    plan_cmd.add_argument(
         "--processing",
         choices=("hardlink_only", "hardlink_remux", "copy_remux"),
         default="copy_remux",
@@ -276,6 +284,7 @@ def _run(args: argparse.Namespace) -> int:
             config,
             default_disc_type=args.disc_type,
             default_title=args.title,
+            default_season_number=args.season,
             default_processing=args.processing,
         )
         _write_json(args.out, value)

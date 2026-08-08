@@ -69,7 +69,7 @@ BDMV 不是“一个电影文件夹”，而是一套播放结构：
 
 这些派生分集都拒绝重复 clip、多角度、`connection_condition=6` 和内容型 SubPath，并在计划中生成警告。只有多个长度相近的独立 playlist、但不能证明它们连续覆盖主标题时，不足以证明 episode 成员关系和顺序，因此不会按 playlist 编号聚类；本盘主标题作为单集，其余进入 extras 候选并提示复核。
 
-同一标准化标题、同一季和同一 edition 下的多张盘按自然顺序连续编号，不同季或 edition 各自从 `E01` 开始。季号优先使用用户配置，其次读取 META 标题和目录中的明确 `Season N`、`Nth Season`、`第N期/季` 或 `シーズンN` 标记；没有可靠证据时默认第 1 季并给出警告，不从裸数字或 `S2` 猜测。用户可用 `episode_start` 处理非连续起始集号，规划阶段会阻止组内集号范围重叠。
+同一标准化标题、同一季和同一 edition 下的多张盘按自然顺序连续编号，不同季或 edition 各自从 `E01` 开始。季号优先使用逐盘 `season`，其次采用命令行 `--season`，再读取 META 标题和目录中的明确 `Season N`、`Nth Season`、`第N期/季` 或 `シーズンN` 标记；没有可靠证据时默认第 1 季并给出警告，不从裸数字或 `S2` 猜测，也不阻止构建。默认结果以 `season_confidence = "low"` 和 `needs_season_review = true` 进入计划、结果及状态审计；显式配置和明确标记使用高置信度。用户可用 `episode_start` 处理非连续起始集号，规划阶段会阻止组内集号范围重叠。
 
 电影和剧集盘的其余语义唯一、非导航且不少于默认 60 秒的 playlist 都作为 `extras` 候选。花絮 Play-All 只有在完整源覆盖、唯一 clip、无多角度及无内容型 SubPath 的前提下才拆分：非无缝连接是强边界；无缝 Entry Mark 还必须得到独立单视频 playlist 或短时 IG Play-All 结构佐证。拆分结果再按实际完整 clip 去重，并优先保留独立 playlist。`bonus` 盘使用相同逻辑。60 秒阈值作用于候选 playlist，不会二次删除已可靠识别出的短分段。若电影盘还存在不少于 20 分钟、且时长达到所选主标题 35% 的其他 playlist，计划会给出歧义警告。
 
@@ -321,7 +321,7 @@ bdmv-emby-builder plan --config task.toml --out plan.json
 
 上映年份暂不推断，也不自动加入目录名。花絮没有可靠自然语言标题时，按“元数据盘名 + playlist 编号 + 时长”命名。
 
-TOML 中的 `[task]` 只保存源路径和目标路径；规划时会统一解析为绝对路径写入 plan，确保换工作目录后仍可重复执行。`[[disc]]` 保存盘类别和可选影片归属。路径属于用户任务数据，不写入程序代码，因此不构成代码硬编码。TOML 支持注释，且 Python 3.11 标准库可以直接读取，不增加第三方依赖。旧 JSON 配置仅保留兼容读取。
+TOML 中的 `[task]` 只保存源路径和目标路径；规划时会把路径统一解析为绝对路径写入 plan，确保换工作目录后仍可重复执行。`[[disc]]` 保存盘类别和可选影片归属，因此一个任务可同时处理多个不同作品。目录名优先使用逐盘 `title`，其次使用仅适合同一作品输入的 CLI `--title`，再按日文 META、英文/其他 META、原盘目录名回退；plan、results 与 state 同时记录 `library_title` 和 `library_title_source`。路径属于用户任务数据，不写入程序代码，因此不构成代码硬编码。TOML 支持注释，且 Python 3.11 标准库可以直接读取，不增加第三方依赖。旧 JSON 配置仅保留兼容读取。
 
 当 `task.source` 只指向一张盘时，使用一个省略 `path` 的 `[[disc]]`。当它指向包含多张盘的根目录时，每个 `[[disc]].path` 描述相对于 `task.source` 的位置；盘类别、Bonus 归属和多版本归属属于对应的 disc。
 
