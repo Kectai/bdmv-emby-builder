@@ -1680,7 +1680,8 @@ class CoreTests(unittest.TestCase):
     def test_case_colliding_mpls_files_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bdmv = root / "Disc" / "BDMV"
+            source_root = root / "source"
+            bdmv = source_root / "Disc" / "BDMV"
             playlist_dir = bdmv / "PLAYLIST"
             stream_dir = bdmv / "STREAM"
             playlist_dir.mkdir(parents=True)
@@ -1693,7 +1694,7 @@ class CoreTests(unittest.TestCase):
             self._write_mpls(upper)
             (stream_dir / "00000.m2ts").touch()
 
-            discs = scan(root)
+            discs = scan(source_root)
             self.assertEqual(len(discs), 1)
             self.assertEqual(discs[0].playlists, [])
             self.assertIn(
@@ -1722,7 +1723,7 @@ class CoreTests(unittest.TestCase):
             }
             plan = {
                 "schema_version": 7,
-                "source_root": str(root),
+                "source_root": str(source_root),
                 "destination_root": str(destination),
                 "settings": {},
                 "jobs": [job],
@@ -1735,7 +1736,8 @@ class CoreTests(unittest.TestCase):
     def test_case_colliding_m2ts_files_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bdmv = root / "Disc" / "BDMV"
+            source_root = root / "source"
+            bdmv = source_root / "Disc" / "BDMV"
             playlist_dir = bdmv / "PLAYLIST"
             stream_dir = bdmv / "STREAM"
             playlist_dir.mkdir(parents=True)
@@ -1749,7 +1751,7 @@ class CoreTests(unittest.TestCase):
                 self.skipTest("filesystem does not permit case-distinct names")
             upper.touch()
 
-            discs = scan(root)
+            discs = scan(source_root)
             self.assertEqual(len(discs), 1)
             self.assertEqual(discs[0].playlists, [])
             self.assertIn(
@@ -1778,7 +1780,7 @@ class CoreTests(unittest.TestCase):
             }
             plan = {
                 "schema_version": 7,
-                "source_root": str(root),
+                "source_root": str(source_root),
                 "destination_root": str(destination),
                 "settings": {},
                 "jobs": [job],
