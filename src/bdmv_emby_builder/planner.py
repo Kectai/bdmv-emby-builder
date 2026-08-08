@@ -19,11 +19,11 @@ from typing import Any
 
 from .episode import (
     chapter_pattern_groups as _shared_chapter_pattern_groups,
+    independent_episode_playitem_positions,
     partition_episode_chapters,
     partition_episode_playitems,
 )
 from .limits import (
-    EPISODE_DURATION_RATIO,
     EPISODE_MAX_SECONDS,
     EPISODE_MIN_SECONDS,
     EXTRA_CONTENT_ANALYSIS_MAX_SECONDS,
@@ -688,10 +688,6 @@ def _split_independent_episode_playitems(
         or any(item.connection_condition == 6 for item in playlist.items[1:])
         or len({item.clip_id for item in playlist.items}) != len(playlist.items)
         or not all(
-            _has_entry_mark_at_item_start(playlist, item, tolerance_seconds)
-            for item in playlist.items
-        )
-        or not all(
             _item_covers_complete_clip(
                 disc, item, ffprobe, cache, tolerance_seconds
             )
@@ -699,16 +695,18 @@ def _split_independent_episode_playitems(
         )
     ):
         return []
-    durations = [item.duration_seconds for item in playlist.items]
-    if (
-        min(durations) < EPISODE_MIN_SECONDS
-        or max(durations) > EPISODE_MAX_SECONDS
-        or max(durations) / min(durations) > EPISODE_DURATION_RATIO
-    ):
+    positions = independent_episode_playitem_positions(
+        playlist, tolerance_seconds
+    )
+    if not positions:
         return []
     result: list[tuple[Playlist, float]] = []
-    accumulated_ticks = 0
-    for position, item in enumerate(playlist.items, 1):
+    offsets = [0]
+    for item in playlist.items:
+        offsets.append(offsets[-1] + item.duration_ticks)
+    for item_position in positions:
+        item = playlist.items[item_position]
+        position = item_position + 1
         marks = [
             PlaylistMark(mark.mark_type, 0, mark.mark_ticks)
             for mark in playlist.marks
@@ -733,8 +731,7 @@ def _split_independent_episode_playitems(
             playlist.subpath_count,
             playlist.subpath_types,
         )
-        result.append((episode, accumulated_ticks / 45_000))
-        accumulated_ticks += item.duration_ticks
+        result.append((episode, offsets[item_position] / 45_000))
     return result
 
 
@@ -2408,6 +2405,19 @@ def make_plan(
                     and any(len(part.items) > 1 for part, _ in episode_parts)
                     else "episode_playitem_split"
                 )
+                if episode_parts and episode_selection == "episode_playitem_split":
+                    omitted_ticks = main.duration_ticks - sum(
+                        part.duration_ticks for part, _ in episode_parts
+                    )
+                    if omitted_ticks > round(
+                        float(settings["copy_boundary_tolerance_seconds"])
+                        * 45_000
+                    ):
+                        warnings.append(
+                            f"{disc.key}: excluded {clock(omitted_ticks / 45_000)} "
+                            f"of short non-seamless edge PlayItems while splitting "
+                            f"playlist {main.playlist_id} into episodes"
+                        )
                 if episode_selection == "episode_playitem_group":
                     warnings.append(
                         f"{disc.key}: inferred {len(episode_parts)} episodes from "

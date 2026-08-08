@@ -176,7 +176,7 @@ bdmv-emby-builder scan "/absolute/path/to/BDMV_LIBRARY" --out scan.json
 
 季号按“用户配置 > META 明确季标 > 目录明确季标 > 默认第 1 季”确定。自动识别只接受 `Season 2`、`2nd Season`、`第2期`、`第2季`、`シーズン2` 等明确形式；缺少证据时会警告。相同作品、相同季和相同 edition 的多张盘跨盘连续编号；不同季或 edition 各自从 `E01` 开始，组内集号范围重叠会在规划阶段失败。
 
-剧集自动拆分优先使用原盘明确的播放关系。若一个 episode 对应一个完整 PlayItem，则直接拆分；若一个 episode 横跨多个完整 PlayItem，则只在非无缝 Entry Mark 边界成立，并且同作品中其他明确分集提供了稳定时长轮廓，或本盘存在重复的片尾到片头重置结构时才分组。一条完整 M2TS 也可能收录两集或多集：程序先寻找能连续覆盖主标题的独立单集 playlist；没有这种旁证时，才在时长轮廓或重复章节节奏足够明确时按 Entry Mark 章节切分。以上推断都会生成警告并要求审核。
+剧集自动拆分优先使用原盘明确的播放关系。若一个 episode 对应一个完整 PlayItem，则直接拆分；起点 Entry Mark 或 `connection_condition=1` 的非无缝连接都可作为独立硬边界。对于完整、唯一且时长一致的单集 PlayItem，主 Play-All 两端不足 30 秒且同样具有硬边界的片段可作为版权卡或片头标识排除，并在计划中明确记录时长警告。若一个 episode 横跨多个完整 PlayItem，则只在非无缝 Entry Mark 边界成立，并且同作品中其他明确分集提供了稳定时长轮廓，或本盘存在重复的片尾到片头重置结构时才分组。一条完整 M2TS 也可能收录两集或多集：程序先寻找能连续覆盖主标题的独立单集 playlist；没有这种旁证时，才在时长轮廓或重复章节节奏足够明确时按 Entry Mark 章节切分。以上推断都会生成警告并要求审核。
 
 仅有多个时长相近的独立 playlist、但无法证明它们按顺序连续覆盖主标题时，不会按 playlist 编号猜测集数或顺序：本盘主标题作为单集，其余作为 extras 候选，等待用户在派生目录中确认。多角度、`connection_condition=6`、重复 clip 或内容型 SubPath 会阻止派生分集。
 
@@ -334,7 +334,7 @@ TOML、scan、plan、results 和 state 通常包含绝对路径、目录名和�
 python3 -m unittest discover -s tests -v
 ```
 
-当前 152 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、发行目录标题清洗、大小写混合的 BDMV 结构及碰撞拒绝、跨平台路径、链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
+当前 153 项测试覆盖 MPLS 边界与时间计算、内容去重与导航排除、低置信度 extras 的静音/静态画面复核提示、带短边缘版权卡且无 Entry Mark 的非无缝单 PlayItem 分集、普通单 PlayItem 分集、多 PlayItem 分集、单 M2TS 多集、季号/集号/edition、发行目录标题清洗、大小写混合的 BDMV 结构及碰撞拒绝、跨平台路径、链接/特殊文件边界、审计产物冲突、空间与文件身份保护、重封装时长/轨道/时间线校验、锁、中断审计、完整内容哈希及重定位。GitHub Actions 已配置为在 Ubuntu、macOS 和 Windows 的 Python 3.11 上构建 wheel/sdist、安装 wheel 并运行同一测试集，其中 Windows 会实际创建目录 junction 验证 reparse point 防护。
 
 真实数据验证覆盖多张 BDMV、电影主盘、纯特典盘、多盘剧集、一集一个 M2TS、一集跨多个 M2TS、1080p/4K、多段 seamless branching 正片及直接复制/硬链接/重封装。记录见[验证报告](examples/VALIDATION.md)。
 

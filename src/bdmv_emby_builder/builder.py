@@ -20,10 +20,13 @@ from statistics import median
 from typing import Any
 import unicodedata
 
-from .episode import partition_episode_chapters, partition_episode_playitems
+from .episode import (
+    independent_episode_playitem_positions,
+    partition_episode_chapters,
+    partition_episode_playitems,
+)
 from .limits import (
     EPISODE_BOUNDARY_SHORT_ITEM_SECONDS,
-    EPISODE_DURATION_RATIO,
     EPISODE_GROUP_DURATION_RATIO,
     EPISODE_MAX_SECONDS,
     EPISODE_MIN_SECONDS,
@@ -1208,19 +1211,12 @@ def _validate_job_against_mpls(
                     f"playlist_segment is outside the MPLS PlayItems: {segment}"
                 )
             if job.get("kind") == "episode" and selection == "episode_playitem_split":
-                durations = [
-                    item.duration_ticks / TICKS_PER_SECOND
-                    for item in playlist.items
-                ]
+                episode_positions = independent_episode_playitem_positions(
+                    playlist, copy_boundary_tolerance_seconds
+                )
                 boundaries_valid = (
                     end - start == 1
-                    and all(
-                        has_entry_boundary(position)
-                        for position in range(len(playlist.items))
-                    )
-                    and min(durations) >= EPISODE_MIN_SECONDS
-                    and max(durations) <= EPISODE_MAX_SECONDS
-                    and max(durations) / min(durations) <= EPISODE_DURATION_RATIO
+                    and start in episode_positions
                 )
             elif job.get("kind") == "episode" and selection == "episode_playitem_group":
                 hint = job.get("episode_duration_hint_seconds")
@@ -1635,7 +1631,7 @@ def _episode_profile_key(job: dict[str, Any]) -> tuple[str, str]:
 
 
 def _validated_episode_duration_hints(
-    jobs: list[dict[str, Any]],
+    jobs: list[dict[str, Any]], tolerance_seconds: float
 ) -> dict[tuple[str, str], float]:
     """Rebuild peer profiles only from complete, independently split parents."""
     parent_groups: dict[
@@ -1660,9 +1656,12 @@ def _validated_episode_duration_hints(
         playlist = parse_mpls(Path(mpls_text))
         if len(playlist.items) < 2:
             continue
+        positions = independent_episode_playitem_positions(
+            playlist, tolerance_seconds
+        )
         expected_segments = {
-            f"{playlist.playlist_id}-P{index:02d}"
-            for index in range(1, len(playlist.items) + 1)
+            f"{playlist.playlist_id}-P{position + 1:02d}"
+            for position in positions
         }
         actual_segments = {job.get("playlist_segment") for job in peers}
         if actual_segments != expected_segments or len(peers) != len(
@@ -1685,7 +1684,9 @@ def _validate_derived_episode_partitions(
     jobs: list[dict[str, Any]], tolerance_seconds: float
 ) -> None:
     """Require every derived episode set to match planner-reconstructable proof."""
-    trusted_hints = _validated_episode_duration_hints(jobs)
+    trusted_hints = _validated_episode_duration_hints(
+        jobs, tolerance_seconds
+    )
     derived: dict[
         tuple[str, str, tuple[str, str]], list[dict[str, Any]]
     ] = {}

@@ -6,6 +6,7 @@ from statistics import median
 
 from .limits import (
     EPISODE_BOUNDARY_SHORT_ITEM_SECONDS,
+    EPISODE_DURATION_RATIO,
     EPISODE_GROUP_DURATION_RATIO,
     EPISODE_MAX_SECONDS,
     EPISODE_MIN_SECONDS,
@@ -30,6 +31,71 @@ def _has_entry_mark_at_item_start(
         and abs(mark.mark_ticks - item.in_ticks) <= tolerance_ticks
         for mark in playlist.marks
     )
+
+
+def independent_episode_playitem_positions(
+    playlist: Playlist, tolerance_seconds: float
+) -> list[int]:
+    """Return whole-episode PlayItems separated by authored hard boundaries.
+
+    A small leading or trailing non-seamless PlayItem is allowed so authored
+    copyright cards and studio bumpers do not force an otherwise unambiguous
+    multi-episode playlist to remain joined. Clip-completeness and SubPath
+    safety are checked by the planner and builder around this shared structural
+    proof.
+    """
+    if (
+        len(playlist.items) < 2
+        or len(playlist.items) > MAX_EPISODE_INFERENCE_BOUNDARIES
+        or len(playlist.marks) > MAX_EPISODE_INFERENCE_BOUNDARIES
+        or any(item.is_multi_angle for item in playlist.items)
+        or any(item.connection_condition == 6 for item in playlist.items[1:])
+        or len({item.clip_id for item in playlist.items}) != len(playlist.items)
+    ):
+        return []
+
+    positions = [
+        position
+        for position, item in enumerate(playlist.items)
+        if EPISODE_MIN_SECONDS <= item.duration_seconds <= EPISODE_MAX_SECONDS
+    ]
+    if len(positions) < 2 or positions != list(
+        range(positions[0], positions[-1] + 1)
+    ):
+        return []
+
+    episode_durations = [
+        playlist.items[position].duration_seconds for position in positions
+    ]
+    if max(episode_durations) / min(episode_durations) > EPISODE_DURATION_RATIO:
+        return []
+
+    edge_positions = [
+        *range(0, positions[0]),
+        *range(positions[-1] + 1, len(playlist.items)),
+    ]
+    if any(
+        playlist.items[position].duration_seconds
+        > EPISODE_BOUNDARY_SHORT_ITEM_SECONDS
+        for position in edge_positions
+    ):
+        return []
+
+    def has_hard_boundary(position: int) -> bool:
+        return (
+            position == 0
+            or playlist.items[position].connection_condition == 1
+            or _has_entry_mark_at_item_start(
+                playlist, position, tolerance_seconds
+            )
+        )
+
+    required_boundaries = set(positions)
+    if positions[-1] + 1 < len(playlist.items):
+        required_boundaries.add(positions[-1] + 1)
+    if not all(has_hard_boundary(position) for position in required_boundaries):
+        return []
+    return positions
 
 
 def partition_episode_playitems(

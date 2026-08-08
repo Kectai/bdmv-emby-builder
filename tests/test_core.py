@@ -42,6 +42,7 @@ from bdmv_emby_builder.builder import (
     validate_plan,
 )
 from bdmv_emby_builder.episode import (
+    independent_episode_playitem_positions,
     partition_episode_chapters,
     partition_episode_playitems,
 )
@@ -390,6 +391,71 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(
             _split_episode_playitems(playlist, disc, "ffprobe", {}, 0.1), []
         )
+
+    def test_unmarked_nonseamless_episode_items_allow_short_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stream_dir = root / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            durations = [1442.0, 1442.1, 1442.0, 7.5]
+            items = []
+            for index, duration in enumerate(durations):
+                clip_id = f"{index:05d}"
+                (stream_dir / f"{clip_id}.m2ts").touch()
+                items.append(
+                    PlayItem(
+                        index,
+                        clip_id,
+                        "M2TS",
+                        90_000,
+                        90_000 + round(duration * 45_000),
+                        1,
+                    )
+                )
+            playlist = Playlist(
+                "00001", root / "BDMV/PLAYLIST/00001.mpls", items, [], 0
+            )
+            disc = Disc("Disc", root / "BDMV", [playlist], [])
+
+            self.assertEqual(
+                independent_episode_playitem_positions(playlist, 0.1),
+                [0, 1, 2],
+            )
+
+            def bounds(
+                source: Path, *_args: object
+            ) -> tuple[float, float]:
+                duration = durations[int(source.stem)]
+                return (2.0, 2.0 + duration)
+
+            with patch(
+                "bdmv_emby_builder.planner._probe_clip_bounds",
+                side_effect=bounds,
+            ):
+                parts = _split_episode_playitems(
+                    playlist, disc, "ffprobe", {}, 0.1
+                )
+            self.assertEqual(
+                [part.playlist_id for part, _ in parts],
+                ["00001-P01", "00001-P02", "00001-P03"],
+            )
+            self.assertEqual(
+                [round(offset, 1) for _, offset in parts],
+                [0.0, 1442.0, 2884.1],
+            )
+
+            tail = playlist.items[-1]
+            playlist.items[-1] = PlayItem(
+                tail.index,
+                tail.clip_id,
+                tail.codec,
+                tail.in_ticks,
+                tail.out_ticks,
+                5,
+            )
+            self.assertEqual(
+                independent_episode_playitem_positions(playlist, 0.1), []
+            )
 
     def test_complete_playitems_are_grouped_by_peer_episode_duration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
