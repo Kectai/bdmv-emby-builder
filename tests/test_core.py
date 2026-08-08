@@ -457,6 +457,41 @@ class CoreTests(unittest.TestCase):
                 independent_episode_playitem_positions(playlist, 0.1), []
             )
 
+            playlist.items[-1] = PlayItem(
+                tail.index,
+                tail.clip_id,
+                tail.codec,
+                tail.in_ticks,
+                tail.out_ticks + round(23.0 * 45_000),
+                1,
+            )
+            self.assertEqual(
+                independent_episode_playitem_positions(playlist, 0.1), []
+            )
+
+            first_tail = playlist.items[-1]
+            playlist.items[-1] = PlayItem(
+                first_tail.index,
+                first_tail.clip_id,
+                first_tail.codec,
+                first_tail.in_ticks,
+                first_tail.in_ticks + round(20.0 * 45_000),
+                1,
+            )
+            playlist.items.append(
+                PlayItem(
+                    len(playlist.items),
+                    "00004",
+                    "M2TS",
+                    90_000,
+                    90_000 + round(10.0 * 45_000),
+                    1,
+                )
+            )
+            self.assertEqual(
+                independent_episode_playitem_positions(playlist, 0.1), []
+            )
+
     def test_complete_playitems_are_grouped_by_peer_episode_duration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

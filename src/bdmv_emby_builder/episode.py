@@ -74,10 +74,16 @@ def independent_episode_playitem_positions(
         *range(0, positions[0]),
         *range(positions[-1] + 1, len(playlist.items)),
     ]
-    if any(
-        playlist.items[position].duration_seconds
+    leading_edge_count = positions[0]
+    trailing_edge_count = len(playlist.items) - positions[-1] - 1
+    if (
+        leading_edge_count > 1
+        or trailing_edge_count > 1
+        or sum(
+            playlist.items[position].duration_seconds
+            for position in edge_positions
+        )
         > EPISODE_BOUNDARY_SHORT_ITEM_SECONDS
-        for position in edge_positions
     ):
         return []
 
